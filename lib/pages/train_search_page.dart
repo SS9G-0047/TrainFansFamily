@@ -127,6 +127,38 @@ const int _kConsistProfileMax = 3;
 /// 车次查询时，最多给几个车组号补查 OpenCRHTracker 历史/配属
 const int _kEmuTrainExpandMax = 5;
 
+// ── 车站大屏分页 ───────────────────────────────────────────────────────────
+// 数据源 GET /api/v2/timetable/station/{站名} 单次最多返回 80 条，
+// 超出部分会被静默截断（不报错、不告知），大站一天几百趟必然看不全。
+// 因此这里做「翻页拉取 + 去重合并」：
+//   · 首屏自动翻 _kBoardAutoPages 页（默认 3 页 = 240 趟）；
+//   · 剩下的由用户点「加载更多」，每次再翻 _kBoardMorePages 页；
+//   · 分页参数名各家不一，这里按候选顺序自动探测，命中后固定复用；
+//   · 全部探测失败就停在 80 条，并在界面上明确标注「可能不完整」，
+//     同时提供时段筛选，让用户自己把范围缩到 80 条以内。
+// 若你已知该接口真实的分页参数，直接改 _kBoardOffsetKeys 等常量即可。
+const int _kBoardPageSize = 80;
+const int _kBoardAutoPages = 3;
+const int _kBoardMorePages = 3;
+/// 列表滑到底时自动续拉一页（大屏翻页场景更顺手，想省配额可关掉）
+const bool _kBoardAutoLoadOnScrollEnd = true;
+/// offset 风格：offset=已取条数
+const String _kBoardOffsetKey = 'offset';
+/// page 风格：page=第几页（从 1 开始）
+const String _kBoardPageKey = 'page';
+/// cursor 风格：cursor=服务端上页回传的游标
+const String _kBoardCursorKey = 'cursor';
+/// 时间戳切片兜底：after=上页最后一条的发车时间戳（秒）
+const String _kBoardAfterTsKey = 'after';
+/// 时段筛选（客户端过滤，用于把结果压回 80 条以内）
+const List<String> _kBoardSlots = <String>[
+  '全部',
+  '0-6 时',
+  '6-12 时',
+  '12-18 时',
+  '18-24 时',
+];
+
 class _CacheEntry {
   final Object data;
   final DateTime at;
@@ -472,6 +504,9 @@ class _BoardItem {
   final String platform; // 站台
   final List<String> models; // 参考车型
   final _EmuSource source;
+  /// 原始时间戳（秒），非展示字段：翻页游标 / 跨页去重 / 时段筛选都靠它
+  final int arriveAt;
+  final int departAt;
 
   const _BoardItem({
     required this.trainCode,
@@ -482,6 +517,39 @@ class _BoardItem {
     required this.platform,
     required this.models,
     required this.source,
+    this.arriveAt = 0,
+    this.departAt = 0,
+  });
+
+  /// 跨页去重键：车次 + 到发时间戳 + 站台
+  String get dedupKey => '$trainCode|$arriveAt|$departAt|$platform';
+
+  /// 时段筛选用的小时（发车优先，取不到用到站），无时间戳返回 -1
+  int get hourOfDay {
+    final s = departAt > 0 ? departAt : arriveAt;
+    if (s <= 0) return -1;
+    return _tsCst(s).hour;
+  }
+}
+
+/// 大屏分页风格：数据源到底认哪种翻页参数，运行时探测
+enum _BoardPageStyle { none, offset, page, cursor, timestamp }
+
+/// 一次分页请求的原始结果
+class _BoardPage {
+  final List<_BoardItem> items;
+  /// 数据源声称的总条数（读不到为 null）
+  final int? total;
+  /// 服务端自报「还有下一页」（读不到为 null）
+  final bool? hasMore;
+  /// 服务端回传的下一页游标（cursor 风格用）
+  final String nextCursor;
+
+  const _BoardPage({
+    required this.items,
+    this.total,
+    this.hasMore,
+    this.nextCursor = '',
   });
 }
 
@@ -501,6 +569,10 @@ class _RailwayApi {
   final Map<String, String> _codeToName = <String, String>{};
   final Map<String, String> _nameToCode = <String, String>{};
   bool _stationsLoaded = false;
+
+  /// 大屏分页风格探测结果：探明一次后全局复用，避免每换一个站都重探一遍
+  _BoardPageStyle? _boardStyleLocked;
+  final Set<_BoardPageStyle> _boardStyleDead = <_BoardPageStyle>{};
 
   List<_Station> get stations => _stations;
 
@@ -1541,46 +1613,208 @@ class _RailwayApi {
 
   // ══ 4. 车站大屏 ═══════════════════════════════════════════════════════════
 
+  /// 分页风格探测顺序：offset → page → cursor → 时间戳切片
+  static const List<_BoardPageStyle> _styleOrder = <_BoardPageStyle>[
+    _BoardPageStyle.offset,
+    _BoardPageStyle.page,
+    _BoardPageStyle.cursor,
+    _BoardPageStyle.timestamp,
+  ];
+
   /// 车站大屏：走 OpenCRHTracker 车站时刻表，失败则由上层回退 12306 原接口。
+  ///
+  /// 数据源单次上限 $_kBoardPageSize 条，大站必然截断，所以这里：
+  ///   首屏自动翻满 _kBoardAutoPages 页，剩下的交给 loadMore 继续追加。
   Future<_BoardResult> queryStationBoard(
     String stationName, {
     bool forceRefresh = false,
+    bool loadMore = false,
+    int morePages = _kBoardMorePages,
+    _BoardResult? previous,
   }) async {
     final name = stationName.trim();
     final key = 'board|$name';
-    final cached = forceRefresh
-        ? null
-        : _JsonCache.instance.get(key, _kTtlBoard);
+
+    // ── 加载更多：在已有结果上继续翻页 ──
+    if (loadMore) {
+      final cached =
+          forceRefresh ? null : _JsonCache.instance.get(key, _kTtlBoard);
+      final base = previous ?? (cached is _BoardResult ? cached : null);
+      if (base == null) throw Exception('请先查询「$name」的车站大屏');
+      if (!base.hasMore) return base;
+
+      final more = await _boardCollect(base, morePages);
+      _JsonCache.instance.set(key, more);
+      return more;
+    }
+
+    final cached =
+        forceRefresh ? null : _JsonCache.instance.get(key, _kTtlBoard);
     if (cached is _BoardResult) return cached;
 
-    final notes = <String>[];
-    final items = <_BoardItem>[];
-
-    if (_kCrhEnabled) {
-      try {
-        items.addAll(await _boardFromCrh(name));
-      } catch (e) {
-        notes.add('OpenCRHTracker：${_cleanErr(e)}');
-      }
+    if (!_kCrhEnabled) {
+      throw Exception('大屏数据源已关闭（_kCrhEnabled = false）');
     }
 
-    if (items.isEmpty) {
-      throw Exception(
-        notes.isEmpty ? '未查询到「$name」的车站大屏数据' : notes.join('\n'),
-      );
-    }
+    final first = await _boardFetchPage(name, null, _BoardPageStyle.none);
+    if (first.items.isEmpty) throw Exception('该站当日无数据');
 
-    final result = _BoardResult(station: name, items: items, notes: notes);
+    var result = _BoardResult(
+      station: name,
+      items: first.items,
+      notes: const <String>[],
+      total: first.total,
+      fetched: first.items.length,
+      pages: 1,
+      hasMore: first.hasMore ?? (first.items.length >= _kBoardPageSize),
+      truncated: (first.total ?? first.items.length) > first.items.length,
+      nextCursor: first.nextCursor,
+    );
+
+    if (result.hasMore) {
+      result = await _boardCollect(result, _kBoardAutoPages - 1);
+    }
     _JsonCache.instance.set(key, result);
     return result;
   }
 
+  /// 从 [start] 继续翻页，最多再翻 [maxPages] 页。
+  /// 探测失败 / 请求失败都不会丢掉已拿到的数据，只是把 hasMore 关掉。
+  Future<_BoardResult> _boardCollect(_BoardResult start, int maxPages) async {
+    var cur = start;
+    if (maxPages <= 0) return cur;
+
+    final seen = <String>{for (final e in cur.items) e.dedupKey};
+
+    var loaded = 0; // 成功追加的页数
+    var guard = 0; // 总请求次数（含探测失败），防止无效风格把预算耗光
+
+    while (loaded < maxPages && cur.hasMore && guard < maxPages + 4) {
+      guard++;
+      var style = cur.style;
+      final probing = style == _BoardPageStyle.none;
+
+      if (probing) {
+        final next = _nextBoardStyle(cur);
+        if (next == null) {
+          // 四种风格全试过都拿不到新东西：停在现有数据并如实标注
+          return cur.copyWith(
+            hasMore: false,
+            truncated: true,
+            notes: <String>[
+              ...cur.notes,
+              '数据源单次最多返回 $_kBoardPageSize 条且未支持分页，'
+                  '仅取到前 ${cur.items.length} 趟；可切换时段查看其余车次',
+            ],
+          );
+        }
+        style = next;
+      }
+
+      _BoardPage page;
+      try {
+        page = await _boardFetchPage(cur.station, cur, style);
+      } catch (e) {
+        cur = cur.copyWith(
+          tried: <_BoardPageStyle>[...cur.tried, style],
+          notes: <String>[...cur.notes, '继续加载失败：${_cleanErr(e)}'],
+        );
+        if (!probing) return cur.copyWith(hasMore: false);
+        _boardStyleDead.add(style);
+        continue;
+      }
+
+      if (page.items.isEmpty) {
+        cur = probing
+            ? cur.copyWith(tried: <_BoardPageStyle>[...cur.tried, style])
+            : cur.copyWith(hasMore: false);
+        if (!probing) break;
+        _boardStyleDead.add(style);
+        continue;
+      }
+
+      final fresh = <_BoardItem>[];
+      for (final it in page.items) {
+        if (seen.add(it.dedupKey)) fresh.add(it);
+      }
+
+      if (fresh.isEmpty) {
+        // 整页都与已有数据重复 → 服务端根本不认这个参数，换下一种
+        cur = cur.copyWith(tried: <_BoardPageStyle>[...cur.tried, style]);
+        if (!probing) return cur.copyWith(hasMore: false);
+        _boardStyleDead.add(style);
+        continue;
+      }
+
+      cur = cur.append(page, fresh).copyWith(style: style);
+      _boardStyleLocked ??= style;
+      loaded++;
+      if (page.items.length < _kBoardPageSize) {
+        cur = cur.copyWith(hasMore: false);
+      }
+    }
+    return cur;
+  }
+
+  /// 下一个还没试过、且当前可用的分页风格
+  _BoardPageStyle? _nextBoardStyle(_BoardResult cur) {
+    // 同一数据源对所有车站行为一致：探明一次就全局复用，别每次换站都重试
+    final locked = _boardStyleLocked;
+    if (locked != null) {
+      return _styleUsable(locked, cur) ? locked : null;
+    }
+    for (final s in _styleOrder) {
+      if (cur.tried.contains(s) || _boardStyleDead.contains(s)) continue;
+      if (!_styleUsable(s, cur)) continue;
+      return s;
+    }
+    return null;
+  }
+
+  bool _styleUsable(_BoardPageStyle s, _BoardResult cur) {
+    if (s == _BoardPageStyle.cursor) return cur.nextCursor.isNotEmpty;
+    if (s == _BoardPageStyle.timestamp) return _lastBoardTs(cur) > 0;
+    return true;
+  }
+
+  /// 时间戳切片用的游标：已取数据里最后一条的发车时间戳
+  int _lastBoardTs(_BoardResult cur) {
+    for (var i = cur.items.length - 1; i >= 0; i--) {
+      final t = cur.items[i].departAt;
+      if (t > 0) return t;
+    }
+    return 0;
+  }
+
   /// OpenCRHTracker 车站时刻表：GET /api/v2/timetable/station/{站名}
-  Future<List<_BoardItem>> _boardFromCrh(String station) async {
+  /// [style] 为 none 时表示首页，不带任何翻页参数。
+  Future<_BoardPage> _boardFetchPage(
+    String station,
+    _BoardResult? cur,
+    _BoardPageStyle style,
+  ) async {
+    final qp = <String, String>{'limit': '$_kBoardPageSize'};
+    switch (style) {
+      case _BoardPageStyle.none:
+        break;
+      case _BoardPageStyle.offset:
+        qp[_kBoardOffsetKey] = '${cur?.fetched ?? 0}';
+        break;
+      case _BoardPageStyle.page:
+        qp[_kBoardPageKey] = '${(cur?.pages ?? 0) + 1}';
+        break;
+      case _BoardPageStyle.cursor:
+        qp[_kBoardCursorKey] = cur?.nextCursor ?? '';
+        break;
+      case _BoardPageStyle.timestamp:
+        qp[_kBoardAfterTsKey] = cur == null ? '0' : '${_lastBoardTs(cur)}';
+        break;
+    }
+
     final res = await _getPlain(
       Uri.parse(
         '$_kCrhBase/timetable/station/${Uri.encodeComponent(station)}',
-      ).replace(queryParameters: <String, String>{'limit': '80'}),
+      ).replace(queryParameters: qp),
       referer: 'https://crh.lihugang.top/',
     ).timeout(const Duration(seconds: 15));
 
@@ -1594,7 +1828,9 @@ class _RailwayApi {
     }
     final data = (root is Map) ? root['data'] : null;
     final items = (data is Map) ? (data['items'] as List?) : null;
-    if (items == null || items.isEmpty) throw Exception('该站当日无数据');
+    if (items == null || items.isEmpty) {
+      return const _BoardPage(items: <_BoardItem>[]);
+    }
 
     final out = <_BoardItem>[];
     for (final e in items) {
@@ -1623,19 +1859,59 @@ class _RailwayApi {
       }
 
       final plat = e['platformNo'];
+      final aTs = (e['arriveAt'] is int) ? e['arriveAt'] as int : 0;
+      final dTs = (e['departAt'] is int) ? e['departAt'] as int : 0;
       out.add(_BoardItem(
         trainCode: code,
         startStation: (e['startStation'] ?? '').toString(),
         endStation: (e['endStation'] ?? '').toString(),
-        arriveTime: _hhmm(e['arriveAt'] is int ? e['arriveAt'] as int : null),
-        departTime: _hhmm(e['departAt'] is int ? e['departAt'] as int : null),
+        arriveTime: _hhmm(aTs > 0 ? aTs : null),
+        departTime: _hhmm(dTs > 0 ? dTs : null),
         platform: (plat is int && plat > 0) ? '$plat' : '',
         models: models,
         source: _EmuSource.crhTracker,
+        arriveAt: aTs,
+        departAt: dTs,
       ));
     }
-    if (out.isEmpty) throw Exception('无有效记录');
-    return out;
+
+    return _BoardPage(
+      items: out,
+      total: _readBoardTotal(root, data),
+      hasMore: _readBoardHasMore(root, data),
+      nextCursor: _readBoardCursor(root, data),
+    );
+  }
+
+  /// 服务端自报总条数（字段名各家不一，多试几个；读不到返回 null）
+  int? _readBoardTotal(dynamic root, dynamic data) {
+    for (final k in <String>['total', 'totalCount', 'count', 'total_count']) {
+      final v = (data is Map ? data[k] : null) ?? (root is Map ? root[k] : null);
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      if (v is String) {
+        final n = int.tryParse(v);
+        if (n != null) return n;
+      }
+    }
+    return null;
+  }
+
+  bool? _readBoardHasMore(dynamic root, dynamic data) {
+    for (final k in <String>['hasMore', 'hasNext', 'has_next', 'more']) {
+      final v = (data is Map ? data[k] : null) ?? (root is Map ? root[k] : null);
+      if (v is bool) return v;
+    }
+    return null;
+  }
+
+  String _readBoardCursor(dynamic root, dynamic data) {
+    for (final k in <String>['nextCursor', 'next_cursor', 'pageToken', 'next']) {
+      final v = (data is Map ? data[k] : null) ?? (root is Map ? root[k] : null);
+      if (v is String && v.isNotEmpty) return v;
+      if (v is num) return v.toString();
+    }
+    return '';
   }
 }
 
@@ -1702,11 +1978,91 @@ class _BoardResult {
   final List<_BoardItem> items;
   final List<String> notes;
 
+  /// 数据源声称的当日总趟数（读不到为 null）
+  final int? total;
+  /// 是否还能继续翻页
+  final bool hasMore;
+  /// 已被数据源单次上限截断（即使翻到头也未必是全天完整数据）
+  final bool truncated;
+  /// 当前生效的分页风格
+  final _BoardPageStyle style;
+  /// 已尝试过但无效的分页风格（避免重复探测浪费配额）
+  final List<_BoardPageStyle> tried;
+  /// 已翻页数（首页为 1）
+  final int pages;
+  /// 服务端累计返回条数（可能多于去重后的 items.length，offset 分页要用它）
+  final int fetched;
+  /// cursor 风格下服务端回传的下一页游标
+  final String nextCursor;
+
   const _BoardResult({
     required this.station,
     required this.items,
     required this.notes,
+    this.total,
+    this.hasMore = false,
+    this.truncated = false,
+    this.style = _BoardPageStyle.none,
+    this.tried = const <_BoardPageStyle>[],
+    this.pages = 1,
+    this.fetched = 0,
+    this.nextCursor = '',
   });
+
+  _BoardResult copyWith({
+    List<_BoardItem>? items,
+    List<String>? notes,
+    int? total,
+    bool? hasMore,
+    bool? truncated,
+    _BoardPageStyle? style,
+    List<_BoardPageStyle>? tried,
+    int? pages,
+    int? fetched,
+    String? nextCursor,
+  }) {
+    return _BoardResult(
+      station: station,
+      items: items ?? this.items,
+      notes: notes ?? this.notes,
+      total: total ?? this.total,
+      hasMore: hasMore ?? this.hasMore,
+      truncated: truncated ?? this.truncated,
+      style: style ?? this.style,
+      tried: tried ?? this.tried,
+      pages: pages ?? this.pages,
+      fetched: fetched ?? this.fetched,
+      nextCursor: nextCursor ?? this.nextCursor,
+    );
+  }
+
+  /// 追加一页（[fresh] 为去重后的新增部分）
+  _BoardResult append(_BoardPage page, List<_BoardItem> fresh) {
+    final t = page.total ?? total;
+    return copyWith(
+      items: <_BoardItem>[...items, ...fresh],
+      total: t,
+      pages: pages + 1,
+      fetched: fetched + page.items.length,
+      nextCursor: page.nextCursor,
+      // 自报 hasMore 优先；否则按「本页是否拿满」推断
+      hasMore: page.hasMore ?? (page.items.length >= _kBoardPageSize),
+      truncated: t != null && items.length + fresh.length < t,
+    );
+  }
+
+  /// 头部文案，如「共 312 趟 · 已加载 240」
+  String get countLabel {
+    final t = total;
+    if (t != null && t > items.length) {
+      return '共 $t 趟 · 已加载 ${items.length}';
+    }
+    if (t != null) return '共 $t 趟';
+    return '当日 ${items.length} 趟';
+  }
+
+  /// 是否值得显示「加载更多」按钮
+  bool get canLoadMore => hasMore;
 }
 
 String _cleanErr(Object e) =>
@@ -2029,6 +2385,10 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
   _EmuResult? _emuResult;
   // 车站大屏查询结果
   _BoardResult? _boardResult;
+  /// 大屏「加载更多」进行中
+  bool _boardLoadingMore = false;
+  /// 大屏时段筛选：0 = 全部，1~4 对应 _kBoardSlots
+  int _boardSlot = 0;
 
   bool _stationsReady = false;
 
@@ -2102,6 +2462,8 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
       _stationTrains = <_StationTrain>[];
       _emuResult = null;
       _boardResult = null;
+      _boardSlot = 0;
+      _boardLoadingMore = false;
     });
 
     try {
@@ -2197,6 +2559,47 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
       throw Exception('未找到$label「$kw」，请从联想列表中选择');
     }
     return s;
+  }
+
+  // ── 车站大屏：翻页 / 时段筛选 ────────────────────────────────────────────
+
+  /// 大屏「加载更多」：在现有结果上继续翻页，失败只提示不丢数据
+  Future<void> _loadMoreBoard({bool auto = false}) async {
+    final cur = _boardResult;
+    if (cur == null || !cur.hasMore || _boardLoadingMore) return;
+    if (mounted) setState(() => _boardLoadingMore = true);
+    try {
+      final more = await _api.queryStationBoard(
+        cur.station,
+        loadMore: true,
+        // 滑到底自动续拉时一次只加一页，手动点按钮一次翻 _kBoardMorePages 页
+        morePages: auto ? 1 : _kBoardMorePages,
+        previous: cur,
+      );
+      if (mounted) setState(() => _boardResult = more);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('加载更多失败：${_cleanErr(e)}'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _boardLoadingMore = false);
+    }
+  }
+
+  /// 大屏可见列表（按时段过滤，原始数据不变）
+  List<_BoardItem> _visibleBoardItems(_BoardResult b) {
+    if (_boardSlot <= 0) return b.items;
+    final from = (_boardSlot - 1) * 6;
+    final to = from + 6;
+    return b.items.where((t) {
+      final h = t.hourOfDay;
+      return h >= from && h < to;
+    }).toList();
   }
 
   /// 站-站结果的可见列表（按筛选条件过滤，原始数据不变）
@@ -2807,19 +3210,19 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             padding: EdgeInsets.all(24),
             child: Text('暂无担当记录', textAlign: TextAlign.center),
           ),
-        if (r.records.isNotEmpty) ...<Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
-            child: Text(
-              r.isTrainQuery
-                  ? '担当明细 ${r.records.length} 条'
-                      '（含各车组担当的其他车次）'
-                  : '近期担当 ${r.records.length} 条',
-              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-            ),
-          ),
-          ...r.records.map(_emuRecordCard),
-        ],
+        // if (r.records.isNotEmpty) ...<Widget>[
+        //   Padding(
+        //     padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
+        //     child: Text(
+        //       r.isTrainQuery
+        //           ? '担当明细 ${r.records.length} 条'
+        //               '（含各车组担当的其他车次）'
+        //           : '近期担当 ${r.records.length} 条',
+        //       style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+        //     ),
+        //   ),
+        //   ...r.records.map(_emuRecordCard),
+        // ],
         if (r.errors.isNotEmpty) ...<Widget>[
           const SizedBox(height: 10),
           Padding(
@@ -2854,6 +3257,7 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
   // ── 车站大屏 ────────────────────────────────────────────────────────────
 
   Widget _boardView(_BoardResult b) {
+    final items = _visibleBoardItems(b);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
@@ -2866,7 +3270,7 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  '${b.station}　当日 ${b.items.length} 趟',
+                  '${b.station}　${b.countLabel}',
                   style: const TextStyle(fontSize: 13),
                 ),
               ),
@@ -2877,6 +3281,27 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             ],
           ),
         ),
+        // 时段筛选：数据拿不全时，用它把范围压回单次上限以内
+        if (b.truncated || b.items.length >= _kBoardPageSize)
+          SizedBox(
+            height: 38,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              itemCount: _kBoardSlots.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) => ChoiceChip(
+                label: Text(
+                  _kBoardSlots[i],
+                  style: const TextStyle(fontSize: 12),
+                ),
+                selected: _boardSlot == i,
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                onSelected: (_) => setState(() => _boardSlot = i),
+              ),
+            ),
+          ),
         if (b.notes.isNotEmpty)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
@@ -2885,15 +3310,87 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
               style: const TextStyle(fontSize: 11, color: Colors.orange),
             ),
           ),
+        if (b.truncated)
+          Container(
+            margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.orange.withOpacity(0.12),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Icon(Icons.info_outline, size: 14, color: Colors.orange),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    b.canLoadMore
+                        ? '数据源单次最多返回 $_kBoardPageSize 条，已分 ${b.pages} 页'
+                            '取到 ${b.items.length} 趟，可继续加载更多'
+                        : '数据源单次最多返回 $_kBoardPageSize 条且未支持分页，'
+                            '${b.items.length} 趟可能不完整，建议切换时段查看',
+                    style: const TextStyle(fontSize: 11, color: Colors.orange),
+                  ),
+                ),
+              ],
+            ),
+          ),
         Expanded(
           child: ListView.separated(
             padding: const EdgeInsets.all(12),
-            itemCount: b.items.length,
+            itemCount: items.length + 1,
             separatorBuilder: (_, __) => const SizedBox(height: 6),
-            itemBuilder: (_, i) => _boardCard(b.items[i]),
+            itemBuilder: (_, i) =>
+                i >= items.length ? _boardFooter(b) : _boardCard(items[i]),
           ),
         ),
       ],
+    );
+  }
+
+  /// 大屏列表尾部：加载中 / 加载更多 / 到底了
+  Widget _boardFooter(_BoardResult b) {
+    if (_boardLoadingMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+    if (b.canLoadMore) {
+      // 滑到底自动续拉一页，避免用户手动点太多次
+      if (_kBoardAutoLoadOnScrollEnd) {
+        WidgetsBinding.instance
+            .addPostFrameCallback((_) => _loadMoreBoard(auto: true));
+      }
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: OutlinedButton.icon(
+          onPressed: _loadMoreBoard,
+          icon: const Icon(Icons.expand_more, size: 18),
+          label: Text(
+            '加载更多（已 ${b.items.length}'
+            '${b.total != null ? ' / ${b.total}' : ''} 趟）',
+          ),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Center(
+        child: Text(
+          b.truncated
+              ? '已到数据源上限，切换时段可看其余车次'
+              : '已显示全部 ${b.items.length} 趟',
+          style: const TextStyle(fontSize: 11, color: Colors.grey),
+        ),
+      ),
     );
   }
 

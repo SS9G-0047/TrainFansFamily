@@ -42,7 +42,7 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
       initialCenter: gcj02Center,
       initialZoom: 12.0,
       minZoom: 4.0,
-      maxZoom: 14.0,
+      maxZoom: 18.0,
       interactionOptions: InteractionOptions(
         flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
       ),

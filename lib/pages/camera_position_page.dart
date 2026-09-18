@@ -1258,7 +1258,7 @@ class _SimpleMapPickPageState extends State<SimpleMapPickPage> {
       initialCenter: wgs84ToGcj02(39.9042, 116.4074),
       initialZoom: 15,
       minZoom: 4.0,
-      maxZoom: 14.0,
+      maxZoom: 18.0,
       interactionOptions: InteractionOptions(
         flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
       ),
@@ -1442,7 +1442,7 @@ class _CameraPositionDetailPageState extends State<CameraPositionDetailPage> {
       initialCenter: wgs84ToGcj02(39.9042, 116.4074),
       initialZoom: 15,
       minZoom: 4.0,
-      maxZoom: 14.0,
+      maxZoom: 18.0,
       interactionOptions: InteractionOptions(
         flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
       ),

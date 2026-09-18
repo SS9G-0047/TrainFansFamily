@@ -65,7 +65,7 @@ class MapAttribution extends StatelessWidget {
             borderRadius: BorderRadius.circular(2),
           ),
           child: const Text(
-            '©高德地图 & OSM Contributors',
+            '©高德地图 & OpenStreetMap Contributors',
             style: TextStyle(fontSize: 10, color: Colors.black54),
           ),
         ),
