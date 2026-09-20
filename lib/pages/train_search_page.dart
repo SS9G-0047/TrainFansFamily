@@ -21,6 +21,15 @@
 //                   再并发补 OpenCRHTracker 的历史与配属（最多 5 组）。
 //   4. 车站    : 某站当日大屏（站台 / 到发时刻 / 参考车型）
 //                数据源：OpenCRHTracker；点击车次直接进「车次」同款时刻表页
+//   5. 普速    : 车厢配属（cr400bf.passearch.info）/ 机车配属（loco.passearch.info）
+//                两个站都只有 HTML 表格、没有 JSON API，靠 _parseHtmlTable 硬解析
+//                （按表头文字定位列索引，不写死列序）。
+//                两者拆成两个独立分栏：关键字、查询维度、结果、翻页各管各的
+//                ——车厢查的是车次（Z155），机车查的是型号（HXD3D），
+//                  本来就不是一个关键字，不该共用一个输入框。
+//                机车站没有车次维度，只能按型号或配属段查，
+//                所以查不到「某趟车今天用什么机车」。
+//                两个站每页固定 50 条，列表底部可「加载更多」。
 //
 // ── 里程数据源 ────────────────────────────────────────────────────────────
 //   黄河铁路网（jprailfan.com）：社区站，无公开 JSON API，返回的是传统 HTML
@@ -120,12 +129,67 @@ const Duration _kTtlBoard = Duration(seconds: 60); // 车站大屏，实时
 const Duration _kTtlMileage = Duration(days: 7); // 里程，基本不变
 const Duration _kTtlLate = Duration(minutes: 2); // 正晚点，实时但频控严
 const Duration _kTtlConsist = Duration(minutes: 30); // 担当车组，一天才变几次
+const Duration _kTtlPas = Duration(minutes: 30); // 普速配属，一天才变几次
 /// 车次详情页最多展示几组最近担当的动车组
 const int _kConsistMax = 10;
 /// 其中最多给几组补查车型（OpenCRHTracker 配额有限）
 const int _kConsistProfileMax = 3;
 /// 车次查询时，最多给几个车组号补查 OpenCRHTracker 历史/配属
 const int _kEmuTrainExpandMax = 5;
+
+// ── 普速配属数据源（车厢 / 机车）───────────────────────────────────────────
+// ① 车厢（车辆）配属：https://cr400bf.passearch.info
+//      GET /index.php?keyword={kw}&type={type}&pagenum=N
+//      表头：型号 车号 现配属 定员 运用车次 制造厂 转向架
+// ② 机车配属：https://loco.passearch.info
+//      GET /index.php?keyword={kw}&type={type}&pagenum=N
+//      表头：车号 配属 机务段 厂家 备注
+//
+// ⚠️ 查什么、按什么维度查，一律由用户在界面上选，代码不做任何自动猜测或回退。
+//    下面的 type 值是逐个实测出来的，页面上列了但实际查不出东西的已剔除：
+//      车厢站可用：number=车号 / model=型号 / train=运用车次 / depot=现配属 / bogie=转向架
+//      车厢站不通：no / carno / car（车号）、factory / manufacturer（制造厂）
+//      机车站可用：model=型号 / depot=配属段
+//      机车站不通：no / loco（车号，报「参数错误」）、number（不报错但恒 0 条）、
+//                  factory / manufacturer（厂家）、train（车次）
+//    → 机车站没有车次维度，所以查不到「某趟车今天用什么机车」。
+//    ⚠️ 机车站按型号查时，关键字必须是型号本身（HXD3D），
+//       输完整车号 HXD3D0001 会返回「0 条」——不是报错，是查不到。
+//    → 这是用户最容易踩的坑，界面上有提示。
+//    哪天站点补上了，往这两个 Map 里加一项即可（UI 会自动多出一个选项）。
+const String _kPasCarBase = 'https://cr400bf.passearch.info';
+const String _kPasLocoBase = 'https://loco.passearch.info';
+const bool _kPasCarEnabled = true;
+const bool _kPasLocoEnabled = true;
+/// 车厢站实测可用的查询维度（type → 中文名），按常用度排序
+const Map<String, String> _kPasCarTypes = <String, String>{
+  'train': '运用车次',
+  'number': '车号',
+  'model': '型号',
+  'depot': '现配属',
+  'bogie': '转向架',
+};
+/// 机车站实测可用的查询维度（type → 中文名）
+const Map<String, String> _kPasLocoTypes = <String, String>{
+  'model': '型号',
+  'depot': '配属段',
+};
+/// 关键字示例，随维度变化，直接显示在输入框下面
+const Map<String, String> _kPasCarHint = <String, String>{
+  'train': '如 Z155',
+  'number': '如 683046',
+  'model': '如 YW25T',
+  'depot': '如 上局合段',
+  'bogie': '如 SW220K',
+};
+const Map<String, String> _kPasLocoHint = <String, String>{
+  'model': '如 HXD3D（型号，不是 HXD3D0001）',
+  'depot': '如 京局京段',
+};
+/// 服务端固定每页 50 条（实测：车厢 1360 条 / 28 页；机车 739 条 / 15 页）
+const int _kPasPageSize = 50;
+/// 「加载更多」一次翻几页
+const int _kPasMorePages = 1;
 
 // ── 车站大屏分页 ───────────────────────────────────────────────────────────
 // 数据源 GET /api/v2/timetable/station/{站名} 单次最多返回 80 条，
@@ -187,7 +251,9 @@ class _JsonCache {
   void clear() => _map.clear();
 }
 
-enum _SearchMode { stationToStation, trainNo, emuNo, station }
+enum _SearchMode { stationToStation, trainNo, emuNo, station, ordinary }
+
+
 
 // ───────────────────────────────────────────────────────────────────────────
 // 数据模型
@@ -552,6 +618,158 @@ class _BoardPage {
     this.nextCursor = '',
   });
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// 普速配属数据模型（车厢 / 机车）
+// ───────────────────────────────────────────────────────────────────────────
+
+/// 一节车厢（25T / 25G 等）的配属信息
+class _CarStock {
+  final String model; // YW25T
+  final String carNo; // 683046
+  final String depot; // 上局合段
+  final String capacity; // 定员 66
+  final String trainCode; // 运用车次 Z155
+  final String factory; // 唐山
+  final String bogie; // SW220K
+
+  const _CarStock({
+    this.model = '',
+    this.carNo = '',
+    this.depot = '',
+    this.capacity = '',
+    this.trainCode = '',
+    this.factory = '',
+    this.bogie = '',
+  });
+
+  bool get isEmpty => carNo.isEmpty && model.isEmpty;
+
+  /// 一行标题：型号 + 车号
+  String get title => [model, carNo]
+      .where((e) => e.isNotEmpty)
+      .join(' ')
+      .trim();
+
+  /// 副标题：现配属 + 制造厂 + 转向架 + 定员
+  String get subtitle => <String>[
+        depot,
+        factory.isEmpty ? '' : '$factory 制造',
+        bogie,
+        capacity.isEmpty ? '' : '定员 $capacity',
+      ].where((e) => e.isNotEmpty).join('　');
+
+  /// 去重键
+  String get dedupKey => '$model|$carNo|$depot';
+}
+
+/// 一台机车的配属信息
+class _LocoItem {
+  final String locoNo; // HXD3D0001
+  final String bureau; // 沈局
+  final String depot; // 沈段
+  final String factory; // 厂家
+  final String note; // 备注
+
+  const _LocoItem({
+    this.locoNo = '',
+    this.bureau = '',
+    this.depot = '',
+    this.factory = '',
+    this.note = '',
+  });
+
+  bool get isEmpty => locoNo.isEmpty;
+
+  String get title => locoNo;
+
+  String get subtitle => <String>[
+        '${bureau}${depot}'.trim(),
+        factory,
+        note,
+      ].where((e) => e.isNotEmpty).join('　');
+
+  String get dedupKey => locoNo;
+}
+
+/// 车厢查询结果（含分页状态）
+class _CarPart {
+  final List<_CarStock> items;
+  final int? total;
+  final int pages; // 已翻页数
+  final bool hasMore;
+  /// 命中的查询维度：train=运用车次 / model=型号
+  final String type;
+  final String? error;
+
+  const _CarPart({
+    this.items = const <_CarStock>[],
+    this.total,
+    this.pages = 0,
+    this.hasMore = false,
+    this.type = '',
+    this.error,
+  });
+
+  _CarPart copyWith({
+    List<_CarStock>? items,
+    int? total,
+    int? pages,
+    bool? hasMore,
+    String? type,
+    String? error,
+  }) =>
+      _CarPart(
+        items: items ?? this.items,
+        total: total ?? this.total,
+        pages: pages ?? this.pages,
+        hasMore: hasMore ?? this.hasMore,
+        type: type ?? this.type,
+        error: error ?? this.error,
+      );
+}
+
+/// 机车查询结果（含分页状态）
+class _LocoPart {
+  final List<_LocoItem> items;
+  final int? total;
+  final int pages;
+  final bool hasMore;
+  /// 命中的查询维度：model=型号 / depot=配属段
+  final String type;
+  final String? error;
+
+  const _LocoPart({
+    this.items = const <_LocoItem>[],
+    this.total,
+    this.pages = 0,
+    this.hasMore = false,
+    this.type = '',
+    this.error,
+  });
+
+  _LocoPart copyWith({
+    List<_LocoItem>? items,
+    int? total,
+    int? pages,
+    bool? hasMore,
+    String? type,
+    String? error,
+  }) =>
+      _LocoPart(
+        items: items ?? this.items,
+        total: total ?? this.total,
+        pages: pages ?? this.pages,
+        hasMore: hasMore ?? this.hasMore,
+        type: type ?? this.type,
+        error: error ?? this.error,
+      );
+}
+
+/// 普速查询的两个分栏：车厢 / 机车
+enum _PsTab { car, loco }
+
+String _psTabLabel(_PsTab t) => t == _PsTab.car ? '车厢配属' : '机车配属';
 
 // ───────────────────────────────────────────────────────────────────────────
 // 12306 接口封装
@@ -1350,6 +1568,15 @@ class _RailwayApi {
       parts.add(await _emuFromCrh(q));
     }
 
+    // ③-b 兜底：按车组号一路查下来 rail.re 一条都没有，
+    // 再按车次路径试一次（仅此一次，常态不会多打请求）
+    if (_kRailReEnabled &&
+        kind == _EmuQueryKind.emu &&
+        !parts.any((p) => p.records.isNotEmpty)) {
+      final asTrain = await _railRePartByTrain(q);
+      if (asTrain.records.isNotEmpty) parts.add(asTrain);
+    }
+
     // ④ 汇总
     final records = <_EmuRecord>[];
     final recSeen = <String>{};
@@ -1436,25 +1663,46 @@ class _RailwayApi {
 
   /// ①-a rail.re：GET /emu/{车组号} → [ {emu_no, train_no, date}, ... ]
   ///     只接受车组号，传车次会「未收录」
+  ///
+  /// ⚠️ 车组号写法不统一：库里存的是 CR400BF5033（无横杠），
+  /// 但用户习惯输入 CR400BF-5033。带错写法请求会返回空数组（不是报错），
+  /// 之前只试一种写法，遇到写法不一致就静默「未收录」。
+  /// 这里按 _emuNoVariants 依次尝试，命中即用。
   Future<_EmuPart> _emuFromRailRe(String q) async {
     const name = 'rail.re';
-    try {
-      final res = await _getPlain(
-        Uri.parse('$_kRailReBase/emu/${Uri.encodeComponent(q)}'),
-        referer: 'https://rail.re/',
-      ).timeout(const Duration(seconds: 15));
-      if (res.statusCode != 200) {
-        return _EmuPart.error(name, 'HTTP ${res.statusCode}');
-      }
-      final root = jsonDecode(res.body);
-      if (root is! List) return _EmuPart.error(name, '返回格式异常');
+    final tried = <String>[];
+    String? lastErr;
 
-      final out = _parseRailReList(root, fallbackEmu: q);
-      if (out.isEmpty) return _EmuPart.error(name, '未收录');
-      return _EmuPart(records: out, sourceName: name);
-    } catch (e) {
-      return _EmuPart.error(name, _cleanErr(e));
+    for (final v in _emuNoVariants(q)) {
+      if (tried.contains(v)) continue;
+      tried.add(v);
+      try {
+        final res = await _getPlain(
+          Uri.parse('$_kRailReBase/emu/${Uri.encodeComponent(v)}'),
+          referer: 'https://rail.re/',
+        ).timeout(const Duration(seconds: 15));
+
+        if (res.statusCode == 404) {
+          lastErr = 'HTTP 404';
+          continue; // 换下一种写法再试
+        }
+        if (res.statusCode != 200) {
+          return _EmuPart.error(name, 'HTTP ${res.statusCode}');
+        }
+        final root = jsonDecode(res.body);
+        if (root is! List) return _EmuPart.error(name, '返回格式异常');
+
+        final out = _parseRailReList(root, fallbackEmu: q);
+        if (out.isNotEmpty) return _EmuPart(records: out, sourceName: name);
+        lastErr = '空结果';
+      } catch (e) {
+        lastErr = _cleanErr(e);
+      }
     }
+    return _EmuPart.error(
+      name,
+      '未收录（已试 ${tried.join(' / ')}）${lastErr == null ? '' : '：$lastErr'}',
+    );
   }
 
   /// ①-b rail.re：GET /train/{车次} → 该车次近期使用过的所有车组
@@ -1483,18 +1731,39 @@ class _RailwayApi {
 
   /// rail.re 两种接口返回结构一致，共用解析：
   /// [ {emu_no, train_no, date}, ... ] → [_EmuRecord]
+  ///
+  /// 字段名做多候选：接口改版 / 不同分支的字段命名不一致时（emuNo / train /
+  /// serviceDay …），只认死一个名字就会整页解析成空、显示「未收录」。
   List<_EmuRecord> _parseRailReList(
     List root, {
     String fallbackEmu = '',
     String fallbackTrain = '',
   }) {
+    String pick(Map e, List<String> keys) {
+      for (final k in keys) {
+        final v = e[k];
+        if (v == null) continue;
+        final s = v.toString().trim();
+        if (s.isNotEmpty && s != 'null') return s;
+      }
+      return '';
+    }
+
     final out = <_EmuRecord>[];
     for (final e in root) {
       if (e is! Map) continue;
-      final emuNo = _prettyEmuNo((e['emu_no'] ?? '').toString());
+      final emuNo = _prettyEmuNo(
+        pick(e, const <String>['emu_no', 'emuNo', 'emu', 'trainset', 'trainset_no']),
+      );
       // train_no 可能是 "G83/G86" 这类复合写法，只取首段
-      final trainNo = (e['train_no'] ?? '').toString().split('/').first.trim();
-      final date = (e['date'] ?? '').toString();
+      final trainNo = pick(
+        e,
+        const <String>['train_no', 'trainNo', 'train_code', 'trainCode', 'train'],
+      ).split('/').first.trim();
+      final date = pick(
+        e,
+        const <String>['date', 'run_date', 'service_day', 'serviceDay', 'day'],
+      );
       final short = date.length >= 16 ? date.substring(0, 16) : date;
       final emu = emuNo.isNotEmpty ? emuNo : fallbackEmu;
       final train = trainNo.isNotEmpty ? trainNo : fallbackTrain;
@@ -1510,51 +1779,65 @@ class _RailwayApi {
   }
 
   /// ② OpenCRHTracker：历史担当 + 配属档案
+  ///    车组号同样按 _emuNoVariants 逐个试，避免写法不一致导致空结果
   Future<_EmuPart> _emuFromCrh(String q) async {
     const name = 'OpenCRHTracker';
     try {
-      final hist = await _getPlain(
-        Uri.parse('$_kCrhBase/history/emu/${Uri.encodeComponent(q)}')
-            .replace(queryParameters: <String, String>{'limit': '60'}),
-        referer: 'https://crh.lihugang.top/',
-      ).timeout(const Duration(seconds: 15));
-
       final records = <_EmuRecord>[];
       String? histErr;
+      String? hitVariant;
 
-      if (hist.statusCode == 200) {
-        final root = jsonDecode(hist.body);
-        final data = (root is Map) ? root['data'] : null;
-        final items = (data is Map) ? (data['items'] as List?) : null;
-        if (items != null) {
-          for (final e in items) {
-            if (e is! Map) continue;
-            final code = _joinTrainCode(e['trainCode']);
-            final day = e['serviceDay'];
-            final date = (day is int)
-                ? _fmtDash(_serviceDayToDate(day))
-                : '';
-            records.add(_EmuRecord(
-              emuNo: _prettyEmuNo(q),
-              trainCode: code,
-              date: date,
-              source: _EmuSource.crhTracker,
-            ));
+      for (final v in _emuNoVariants(q)) {
+        final hist = await _getPlain(
+          Uri.parse('$_kCrhBase/history/emu/${Uri.encodeComponent(v)}')
+              .replace(queryParameters: <String, String>{'limit': '60'}),
+          referer: 'https://crh.lihugang.top/',
+        ).timeout(const Duration(seconds: 15));
+
+        final parsed = <_EmuRecord>[];
+
+        if (hist.statusCode == 200) {
+          final root = jsonDecode(hist.body);
+          final data = (root is Map) ? root['data'] : null;
+          final items = (data is Map) ? (data['items'] as List?) : null;
+          if (items != null) {
+            for (final e in items) {
+              if (e is! Map) continue;
+              final code = _joinTrainCode(e['trainCode']);
+              final day = e['serviceDay'];
+              final date = (day is int)
+                  ? _fmtDash(_serviceDayToDate(day))
+                  : '';
+              parsed.add(_EmuRecord(
+                emuNo: _prettyEmuNo(q),
+                trainCode: code,
+                date: date,
+                source: _EmuSource.crhTracker,
+              ));
+            }
           }
+          if (root is Map && root['ok'] == false) {
+            histErr = (root['error'] ?? '查询失败').toString();
+          }
+        } else if (hist.statusCode == 404) {
+          histErr = '未收录';
+        } else if (hist.statusCode == 429) {
+          histErr = '触发限频，稍后再试';
+          break; // 继续试只是浪费配额
+        } else {
+          histErr = 'HTTP ${hist.statusCode}';
         }
-        if (root is Map && root['ok'] == false) {
-          histErr = (root['error'] ?? '查询失败').toString();
+
+        if (parsed.isNotEmpty) {
+          records.addAll(parsed);
+          hitVariant = v;
+          histErr = null;
+          break;
         }
-      } else if (hist.statusCode == 404) {
-        histErr = '未收录';
-      } else if (hist.statusCode == 429) {
-        histErr = '触发限频，稍后再试';
-      } else {
-        histErr = 'HTTP ${hist.statusCode}';
       }
 
-      // 配属档案失败不影响交路展示
-      final profile = await _emuProfileFromCrh(q);
+      // 配属档案失败不影响交路展示；同样按变体逐个试
+      final profile = await _emuProfileFromCrhAny(hitVariant ?? q);
 
       if (records.isEmpty && profile == null) {
         return _EmuPart.error(name, histErr ?? '未收录');
@@ -1569,6 +1852,15 @@ class _RailwayApi {
     } catch (e) {
       return _EmuPart.error(name, _cleanErr(e));
     }
+  }
+
+  /// 配属档案按车组号写法逐个尝试，任一命中即返回
+  Future<_EmuProfile?> _emuProfileFromCrhAny(String q) async {
+    for (final v in _emuNoVariants(q)) {
+      final p = await _emuProfileFromCrh(v);
+      if (p != null) return p;
+    }
+    return null;
   }
 
   /// 配属档案：GET /api/v2/allocation/emu/{q}
@@ -1913,6 +2205,803 @@ class _RailwayApi {
     }
     return '';
   }
+
+  // ══ 5. 普速配属查询（车厢 / 机车，两个完全独立的源）══════════════════════
+
+  /// 车厢配属查询（cr400bf.passearch.info）
+  ///
+  /// 两个站都只有 HTML 表格，靠 _parseHtmlTable 硬解析。
+  /// 按哪个维度（type）、查什么关键词，全部由用户在界面上选，代码不做猜测与回退。
+  Future<_CarPart> queryCarStock(
+    String keyword,
+    String type, {
+    bool forceRefresh = false,
+    bool loadMore = false,
+    _CarPart? previous,
+  }) async {
+    if (!_kPasCarEnabled) throw Exception('车厢数据源已关闭，检查文件顶部开关');
+    final kw = keyword.trim();
+    if (kw.isEmpty) throw Exception('请输入查询关键字');
+    final key = _psCacheKey('car', kw, type);
+
+    if (loadMore) {
+      final base = previous ??
+          (forceRefresh
+              ? null
+              : _JsonCache.instance.get(key, _kTtlPas) as _CarPart?);
+      if (base == null) throw Exception('请先查询「$kw」');
+      if (!base.hasMore) return base;
+      final next =
+          await _psCarMore(base, kw, base.type, _kPasMorePages);
+      _JsonCache.instance.set(key, next);
+      return next;
+    }
+
+    final cached =
+        forceRefresh ? null : _JsonCache.instance.get(key, _kTtlPas);
+    if (cached is _CarPart) return cached;
+
+    final part = await _psFetchCars(kw, 1, type);
+    if (part.items.isEmpty) {
+      throw Exception(part.error ?? '没有查到「$kw」的车厢记录');
+    }
+    _JsonCache.instance.set(key, part);
+    return part;
+  }
+
+  /// 机车配属查询（loco.passearch.info）
+  Future<_LocoPart> queryLocoStock(
+    String keyword,
+    String type, {
+    bool forceRefresh = false,
+    bool loadMore = false,
+    _LocoPart? previous,
+  }) async {
+    if (!_kPasLocoEnabled) throw Exception('机车数据源已关闭，检查文件顶部开关');
+    final kw = keyword.trim();
+    if (kw.isEmpty) throw Exception('请输入查询关键字');
+    final key = _psCacheKey('loco', kw, type);
+
+    if (loadMore) {
+      final base = previous ??
+          (forceRefresh
+              ? null
+              : _JsonCache.instance.get(key, _kTtlPas) as _LocoPart?);
+      if (base == null) throw Exception('请先查询「$kw」');
+      if (!base.hasMore) return base;
+      final next =
+          await _psLocoMore(base, kw, base.type, _kPasMorePages);
+      _JsonCache.instance.set(key, next);
+      return next;
+    }
+
+    final cached =
+        forceRefresh ? null : _JsonCache.instance.get(key, _kTtlPas);
+    if (cached is _LocoPart) return cached;
+
+    final part = await _psFetchLocos(kw, 1, type);
+    if (part.items.isEmpty) {
+      throw Exception(part.error ?? '没有查到「$kw」的机车记录');
+    }
+    _JsonCache.instance.set(key, part);
+    return part;
+  }
+
+  String _psCacheKey(String kind, String kw, String type) =>
+      'ps|$kind|${kw.toUpperCase()}|$type';
+
+  Future<_CarPart> _psCarMore(
+    _CarPart cur,
+    String kw,
+    String type,
+    int maxPages,
+  ) async {
+    var next = cur;
+    final seen = <String>{for (final e in cur.items) e.dedupKey};
+    for (var i = 0; i < maxPages && next.hasMore; i++) {
+      final p = await _psFetchCars(kw, next.pages + 1, type);
+      if (p.error != null) return next.copyWith(hasMore: false);
+      final fresh = <_CarStock>[];
+      for (final it in p.items) {
+        if (seen.add(it.dedupKey)) fresh.add(it);
+      }
+      if (fresh.isEmpty) return next.copyWith(hasMore: false);
+      next = next.copyWith(
+        items: <_CarStock>[...next.items, ...fresh],
+        total: p.total ?? next.total,
+        pages: next.pages + 1,
+        hasMore: _psHasMore(next.items.length + fresh.length, p.total,
+            p.items.length),
+      );
+    }
+    return next;
+  }
+
+  Future<_LocoPart> _psLocoMore(
+    _LocoPart cur,
+    String kw,
+    String type,
+    int maxPages,
+  ) async {
+    var next = cur;
+    final seen = <String>{for (final e in cur.items) e.dedupKey};
+    for (var i = 0; i < maxPages && next.hasMore; i++) {
+      final p = await _psFetchLocos(kw, next.pages + 1, type);
+      if (p.error != null) return next.copyWith(hasMore: false);
+      final fresh = <_LocoItem>[];
+      for (final it in p.items) {
+        if (seen.add(it.dedupKey)) fresh.add(it);
+      }
+      if (fresh.isEmpty) return next.copyWith(hasMore: false);
+      next = next.copyWith(
+        items: <_LocoItem>[...next.items, ...fresh],
+        total: p.total ?? next.total,
+        pages: next.pages + 1,
+        hasMore: _psHasMore(next.items.length + fresh.length, p.total,
+            p.items.length),
+      );
+    }
+    return next;
+  }
+
+  /// 车厢：GET {base}/index.php?keyword={kw}&type={type}&pagenum={page}
+  Future<_CarPart> _psFetchCars(String kw, int page, String type) async {
+    final uri = Uri.parse('$_kPasCarBase/index.php').replace(
+      queryParameters: <String, String>{
+        'keyword': kw,
+        'type': type,
+        'pagenum': '$page',
+      },
+    );
+    String body;
+    try {
+      final res = await _getPlain(uri, referer: '$_kPasCarBase/')
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) {
+        return _CarPart(type: type, error: 'HTTP ${res.statusCode}');
+      }
+      body = utf8.decode(res.bodyBytes, allowMalformed: true);
+    } catch (e) {
+      return _CarPart(type: type, error: _cleanErr(e));
+    }
+    if (body.contains('参数错误')) {
+      return _CarPart(type: type, error: '参数错误（该维度不被支持）');
+    }
+
+    final total = _pasTotal(body);
+    // 先把服务端声明的条数传进解析器：它说有 N>0 条时放宽行过滤
+    final table = _parseHtmlTable(body, declared: total);
+    if (table.rows.isEmpty) {
+      return _CarPart(
+        type: type,
+        total: total,
+        error: _psEmptyReason(body, total, '车厢', type),
+      );
+    }
+
+    final items = <_CarStock>[];
+    for (final row in table.rows) {
+      final s = _CarStock(
+        model: _pasCell(row, table.header, const <String>['型号'], 0),
+        carNo: _pasCell(row, table.header, const <String>['车号'], 1),
+        depot: _pasCell(row, table.header, const <String>['现配属', '配属'], 2),
+        capacity: _pasCell(row, table.header, const <String>['定员'], 3),
+        trainCode: _pasCell(
+          row,
+          table.header,
+          const <String>['运用车次', '运用车次(仅供参考)', '车次'],
+          4,
+        ),
+        factory: _pasCell(row, table.header, const <String>['制造厂', '厂家'], 5),
+        bogie: _pasCell(row, table.header, const <String>['转向架'], 6),
+      );
+      if (s.isEmpty) continue;
+      items.add(s);
+    }
+    final kept = items.where((e) => !e.isEmpty).toList();
+    return _CarPart(
+      items: kept,
+      total: total,
+      pages: page,
+      hasMore: _psHasMore(kept.length, total, table.rows.length),
+      type: type,
+    );
+  }
+
+  /// 机车：GET {base}/index.php?keyword={kw}&type={type}&pagenum={page}
+  Future<_LocoPart> _psFetchLocos(String kw, int page, String type) async {
+    final uri = Uri.parse('$_kPasLocoBase/index.php').replace(
+      queryParameters: <String, String>{
+        'keyword': kw,
+        'type': type,
+        'pagenum': '$page',
+      },
+    );
+    String body;
+    try {
+      final res = await _getPlain(uri, referer: '$_kPasLocoBase/')
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) {
+        return _LocoPart(type: type, error: 'HTTP ${res.statusCode}');
+      }
+      body = utf8.decode(res.bodyBytes, allowMalformed: true);
+    } catch (e) {
+      return _LocoPart(type: type, error: _cleanErr(e));
+    }
+    if (body.contains('参数错误')) {
+      return _LocoPart(type: type, error: '参数错误（该维度不被支持）');
+    }
+
+    final total = _pasTotal(body);
+    final table = _parseHtmlTable(body, declared: total);
+    if (table.rows.isEmpty) {
+      return _LocoPart(
+        type: type,
+        total: total,
+        error: _psEmptyReason(body, total, '机车', type),
+      );
+    }
+
+    final items = <_LocoItem>[];
+    for (final row in table.rows) {
+      // ⚠️ 机车页表头实测是 4 格「车号 | 配属机务段 | 厂家 | 备注」，
+      //    「配属」和「机务段」是同一格。两个字段都按包含匹配取到同一列时，
+      //    只保留一个，否则副标题会显示成「沈局沈段沈局沈段」。
+      final bureau = _pasCell(row, table.header, const <String>['配属'], 1);
+      var depot = _pasCell(row, table.header, const <String>['机务段'], 2);
+      if (depot == bureau) depot = '';
+      items.add(
+        _LocoItem(
+          locoNo: _pasCell(row, table.header, const <String>['车号'], 0),
+          bureau: bureau,
+          depot: depot,
+          factory:
+              _pasCell(row, table.header, const <String>['厂家', '制造厂'], 3),
+          note: _pasCell(row, table.header, const <String>['备注'], 4),
+        ),
+      );
+    }
+    final kept = items.where((e) => !e.isEmpty).toList();
+    return _LocoPart(
+      items: kept,
+      total: total,
+      pages: page,
+      hasMore: _psHasMore(kept.length, total, table.rows.length),
+      type: type,
+    );
+  }
+
+  /// 还能不能翻：优先看服务端给的总数，读不到就看本页是否拿满
+  bool _psHasMore(int loaded, int? total, int rowsThisPage) {
+    if (total != null) return loaded < total;
+    return rowsThisPage >= _kPasPageSize;
+  }
+}
+
+/// 「共有符合条件的记录 1360 条」
+int? _pasTotal(String body) {
+  final m = RegExp(r'共有符合条件的记录\s*(\d+)\s*条').firstMatch(body);
+  if (m != null) return int.tryParse(m.group(1) ?? '');
+  return null;
+}
+
+/// 查不到东西时，把原因说清楚——别只丢一句「无记录」
+///
+/// 这两个站在「查不到」和「不支持」上的表现完全不同，混在一起根本没法排查：
+///   · 参数不对  → 页面出现「参数错误」
+///   · 参数对但没数据 → 返回首页模板，没有「共有符合条件的记录」这行
+///   · 真有数据但解析不出来 → 有「共有符合条件的记录 N 条」却没解析到行
+/// 另外机车站按型号查时输完整车号（HXD3D0001）会静默返回 0 条，
+/// 这里单独点出来，否则用户只会看到「无记录」干瞪眼。
+String _psEmptyReason(String body, int? declared, String what, String type) {
+  final trCount = RegExp(r'<tr', caseSensitive: false).allMatches(body).length;
+
+  if (declared == 0) {
+    final tip = what == '机车' && type == 'model'
+        ? '　按型号查请输型号本身（HXD3D），不要输完整车号 HXD3D0001'
+        : '';
+    return '服务端返回 0 条：换个关键字或换个维度试试。$tip';
+  }
+  if (declared != null) {
+    return '页面写着「共有 $declared 条」，但表格没解析出数据行'
+        '（共扫到 $trCount 个 <tr>）。\n'
+        '请确认实际 URL：…/index.php?keyword=…&type=$type&pagenum=1\n'
+        '前几行实际内容：\n${_psTableDebug(body)}';
+  }
+  final noResult = body.contains('共有符合条件的记录');
+  if (noResult) {
+    return '页面有结果统计但解析为空（共扫到 $trCount 个 <tr>）。\n'
+        '前几行实际内容：\n${_psTableDebug(body)}';
+  }
+  final gb = body.contains(RegExp(r'charset=["'']?gb', caseSensitive: false));
+  return '没查到「$what」记录：服务端既没报错也没给结果'
+      '（扫到 $trCount 个 <tr>）。'
+      '${gb ? '⚠️ 该页声明为 GBK 编码，中文可能乱码。' : ''}'
+      '常见原因：关键字写法不对，或该维度此刻无数据。';
+}
+
+/// 按表头名取单元格；表头识别失败时退回列序 fallback
+String _pasCell(
+  List<String> row,
+  Map<String, int> header,
+  List<String> names,
+  int fallback,
+) {
+  // ① 精确匹配
+  for (final n in names) {
+    final idx = header[n];
+    if (idx != null && idx < row.length) return row[idx];
+  }
+  // ② 包含匹配：机车页实测表头是「配属机务段」这种合并格，
+  //    精确找「配属」「机务段」都找不到，只能靠包含关系认出来。
+  for (final n in names) {
+    for (final e in header.entries) {
+      if (e.key.contains(n) || n.contains(e.key)) {
+        if (e.value < row.length) return row[e.value];
+      }
+    }
+  }
+  return fallback < row.length ? row[fallback] : '';
+}
+
+// ── 普速卡片配色 ─────────────────────────────────────────────────────────
+// 查询结果动辄上百条，全是白卡片根本没法扫。
+// 车厢按车种上色（YW 硬卧 / YZ 硬座 / CA 餐车 …），机车按配属局上色，
+// 一眼就能看出这趟车的编组构成或这批机车都归哪个局。
+
+/// 车种前缀 → 色板（MaterialColor，深浅两种色阶各取一支）
+MaterialColor _carModelSwatch(String model) {
+  final m = model.toUpperCase();
+  if (m.startsWith('YW')) return Colors.indigo; // 硬卧
+  if (m.startsWith('RW')) return Colors.purple; // 软卧
+  if (m.startsWith('YZ')) return Colors.green; // 硬座
+  if (m.startsWith('RZ')) return Colors.teal; // 软座
+  if (m.startsWith('CA')) return Colors.orange; // 餐车
+  if (m.startsWith('XL')) return Colors.brown; // 行李车
+  if (m.startsWith('KD')) return Colors.blueGrey; // 空调发电车
+  if (m.startsWith('UZ')) return Colors.grey; // 邮政车
+  if (m.startsWith('WX') || m.startsWith('SY') || m.startsWith('TZ')) {
+    return Colors.blueGrey; // 试验 / 维修 / 回送
+  }
+  return Colors.blue;
+}
+
+/// 车种中文名（用于卡片副标题，比 YW25T 好认）
+String _carModelName(String model) {
+  final m = model.toUpperCase();
+  const names = <String, String>{
+    'YW': '硬卧车',
+    'RW': '软卧车',
+    'YZ': '硬座车',
+    'RZ': '软座车',
+    'CA': '餐车',
+    'XL': '行李车',
+    'KD': '空调发电车',
+    'UZ': '邮政车',
+    'WX': '维修车',
+    'SY': '试验车',
+    'TZ': '回送车',
+  };
+  for (final e in names.entries) {
+    if (m.startsWith(e.key)) return e.value;
+  }
+  return '';
+}
+
+/// 按明暗主题取色阶：深色模式下 700 太暗，改取 300
+Color _swatchOf(BuildContext context, MaterialColor swatch) {
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return dark ? swatch.shade300 : swatch.shade700;
+}
+
+/// 配属局 → 稳定色（同一局始终同色，用字符串 hash 取）
+Color _bureauColor(BuildContext context, String bureau) {
+  const pool = <MaterialColor>[
+    Colors.red,
+    Colors.orange,
+    Colors.amber,
+    Colors.green,
+    Colors.teal,
+    Colors.cyan,
+    Colors.blue,
+    Colors.indigo,
+    Colors.purple,
+    Colors.pink,
+  ];
+  final s = bureau.trim();
+  final h = s.isEmpty ? 0 : s.codeUnits.fold<int>(0, (a, b) => a * 31 + b);
+  return _swatchOf(context, pool[h.abs() % pool.length]);
+}
+
+/// 小标签：有底色的小圆角块，用于车种 / 定员 / 厂家这些次要字段
+Widget _psChip(
+  BuildContext context, {
+  required String text,
+  required Color color,
+}) {
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: color.withOpacity(0.14),
+      borderRadius: BorderRadius.circular(4),
+      border: Border.all(color: color.withOpacity(0.35), width: 0.5),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w500),
+    ),
+  );
+}
+
+/// 一节车厢的卡片：左侧车种色条 + 车号 + 车型/配属/定员/车次
+Widget _buildCarCard(BuildContext context, _CarStock c, {int? index}) {
+  final cs = Theme.of(context).colorScheme;
+  final swatch = _carModelSwatch(c.model);
+  final accent = _swatchOf(context, swatch);
+  final modelName = _carModelName(c.model);
+
+  return Card(
+    margin: const EdgeInsets.only(bottom: 8),
+    clipBehavior: Clip.antiAlias,
+    child: IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Container(width: 4, color: accent),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      if (index != null) ...<Widget>[
+                        SizedBox(
+                          width: 26,
+                          child: Text(
+                            '$index',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: cs.onSurfaceVariant.withOpacity(0.7),
+                            ),
+                          ),
+                        ),
+                      ],
+                      Text(
+                        c.model.isEmpty ? '—' : c.model,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: accent,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          c.carNo.isEmpty ? '' : c.carNo,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            fontFamily: 'monospace',
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (c.trainCode.isNotEmpty)
+                        _psChip(context,
+                            text: c.trainCode, color: cs.primary),
+                    ],
+                  ),
+                  const SizedBox(height: 5),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: <Widget>[
+                      if (c.depot.isNotEmpty)
+                        _psChip(context, text: c.depot, color: cs.secondary),
+                      if (modelName.isNotEmpty)
+                        _psChip(context, text: modelName, color: accent),
+                      if (c.capacity.isNotEmpty)
+                        _psChip(context,
+                            text: '定员 ${c.capacity}', color: cs.onSurfaceVariant),
+                      if (c.factory.isNotEmpty)
+                        _psChip(context, text: c.factory, color: cs.onSurfaceVariant),
+                      if (c.bogie.isNotEmpty)
+                        _psChip(context, text: c.bogie, color: cs.onSurfaceVariant),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// 一台机车的卡片：左侧配属局色条 + 车号 + 局段/厂家/备注
+Widget _buildLocoCard(BuildContext context, _LocoItem l, {int? index}) {
+  final cs = Theme.of(context).colorScheme;
+  final accent = _bureauColor(context, l.bureau.isNotEmpty ? l.bureau : l.locoNo);
+
+  return Card(
+    margin: const EdgeInsets.only(bottom: 8),
+    clipBehavior: Clip.antiAlias,
+    child: IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Container(width: 4, color: accent),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      if (index != null) ...<Widget>[
+                        SizedBox(
+                          width: 26,
+                          child: Text(
+                            '$index',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: cs.onSurfaceVariant.withOpacity(0.7),
+                            ),
+                          ),
+                        ),
+                      ],
+                      Expanded(
+                        child: Text(
+                          l.locoNo.isEmpty ? '—' : l.locoNo,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            fontFamily: 'monospace',
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 5),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: <Widget>[
+                      if (l.bureau.isNotEmpty)
+                        _psChip(context, text: l.bureau, color: accent),
+                      if (l.depot.isNotEmpty)
+                        _psChip(context, text: l.depot, color: cs.secondary),
+                      if (l.factory.isNotEmpty)
+                        _psChip(context, text: l.factory, color: cs.onSurfaceVariant),
+                      if (l.note.isNotEmpty)
+                        _psChip(context, text: l.note, color: cs.onSurfaceVariant),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// 非数据行的特征词。
+///
+/// ⚠️ 这两个站的表格之外还有一堆行会被 <tr> 扫进来：页脚的
+/// 「友情链接: 日本列岛列车大行进 2022 火车wiki在线客里表」、
+/// 分页栏「首页 上一页 下一页 尾页 (2/15)」、统计行「共有符合条件的记录 N 条」、
+/// 顶部导航「查询方式: 车号 型号 …」、版本行「p@ssearch 3.5 Build 37276」。
+/// 不加这道过滤，页脚那串日文友情链接会被当成一条车厢数据渲染出来。
+bool _isPaSSearchJunkRow(String t) {
+  const junk = <String>[
+    '共有符合条件的记录',
+    '首页',
+    '尾页',
+    '上一页',
+    '下一页',
+    '友情链接',
+    '查询方式',
+    '查询关键字',
+    'Contact us',
+    'Build',
+    '主页面',
+    '动车组配属查询',
+    '数据反馈',
+    '备用站',
+    '返回',
+    '提交',
+  ];
+  for (final k in junk) {
+    if (t.contains(k)) return true;
+  }
+  return false;
+}
+
+/// 数据行至少要有一个「像车号/型号」的单元格：字母开头、混着数字
+/// （YW25T / 683046 / HXD3D0001 / RZ25B110389 都符合，纯中文的页脚不符合）
+bool _looksLikeStockRow(List<String> cells) {
+  for (final t in cells) {
+    if (RegExp(r'^[A-Za-z]{1,}[A-Za-z0-9\-]*\d{2,}').hasMatch(t)) return true;
+    if (RegExp(r'^\d{4,}').hasMatch(t)) return true; // 纯数字车号（6 位）
+  }
+  return false;
+}
+
+/// 极简 HTML 表格解析：表头列名 → 列索引 + 数据行（保留空单元格）
+class _HtmlTable {
+  final Map<String, int> header;
+  final List<List<String>> rows;
+
+  const _HtmlTable({this.header = const <String, int>{}, this.rows = const []});
+}
+
+/// 一行是否够格当数据行。
+/// [strict] = false 时放宽「必须长得像车号」这道过滤（只留 junk 过滤）。
+///
+/// ⚠️ 为什么要放宽：机车页实测表头是 4 格「车号 | 配属机务段 | 厂家 | 备注」，
+///    数据行形如「HXD3D0001 | 沈局沈段 | 大连 | …」，
+///    一旦车号列的写法超出 _looksLikeStockRow 的正则（比如带空格、纯中文局段在前），
+///    整页 200 多条会被一刀切光，页面却仍写着「共有 210 条」。
+///    所以服务端声明了 N>0 条时，宁可信它，放宽过滤。
+/// 把 HTML 里的表格切成「行 → 单元格」。
+///
+/// ⚠️ 关键：这两个站的数据行**没有写 `</tr>`**（实测页面 `<tr` 出现 53 次、
+///    带 `</tr>` 的只有 3 个）。浏览器容错能正常渲染，但
+///    `<tr[^>]*>(.*?)</tr>` 这种成对正则只会匹配到 3 行 —— 结果就是
+///    「页面写着 210 条，却解析出 0 行」，而且报错信息看着像页面结构变了。
+///
+/// 所以这里改成**按位置切分**，完全不依赖闭合标签：
+///   1. 扫出所有 `<tr`、`<td`/`<th`、`</table` 的起始下标；
+///   2. 第 i 行的区间 = [第 i 个 `<tr`, 第 i+1 个 `<tr`)，遇到 `</table` 提前截断；
+///   3. 落在该区间内的 `<td`/`<th` 就是这一行的单元格，
+///      每个单元格的文本 = 从它的 `<td` 到下一个 `<td`（或区间末尾），去标签。
+/// 这样闭合与否都能正确解析，列也不会错位。
+///
+/// 注意 `<t[dh](?![a-z])` 的负向预查：否则 `<thead>` 会被当成 `<th`。
+List<List<String>> _htmlRows(String body) {
+  final rowStarts = <int>[];
+  final cellStarts = <int>[];
+  final tableEnds = <int>[];
+  for (final m in RegExp(r'<tr(?![a-z])', caseSensitive: false)
+      .allMatches(body)) {
+    rowStarts.add(m.start);
+  }
+  for (final m in RegExp(r'<t[dh](?![a-z])', caseSensitive: false)
+      .allMatches(body)) {
+    cellStarts.add(m.start);
+  }
+  for (final m in RegExp(r'</table', caseSensitive: false).allMatches(body)) {
+    tableEnds.add(m.start);
+  }
+
+  final out = <List<String>>[];
+  for (var i = 0; i < rowStarts.length; i++) {
+    final rs = rowStarts[i];
+    var end = i + 1 < rowStarts.length ? rowStarts[i + 1] : body.length;
+    for (final te in tableEnds) {
+      if (te > rs && te < end) {
+        end = te;
+        break;
+      }
+    }
+    final mine = <int>[];
+    for (final cs in cellStarts) {
+      if (cs >= rs && cs < end) mine.add(cs);
+    }
+    if (mine.isEmpty) continue;
+    final cells = <String>[];
+    for (var j = 0; j < mine.length; j++) {
+      final ce = j + 1 < mine.length ? mine[j + 1] : end;
+      cells.add(_htmlText(body.substring(mine[j], ce > body.length ? body.length : ce)));
+    }
+    out.add(cells);
+  }
+  return out;
+}
+
+bool _psIsDataRow(List<String> cells, {bool strict = true}) {
+  if (cells.where((t) => t.isNotEmpty).length < 2) return false;
+  if (cells.any(_isPaSSearchJunkRow)) return false;
+  return strict ? _looksLikeStockRow(cells) : true;
+}
+
+_HtmlTable _parseHtmlTable(String body, {int? declared}) {
+  // 按位置切分，不依赖 </tr> / </td> 闭合标签（见 _htmlRows 注释）
+  final all = _htmlRows(body);
+
+  // ── 找表头 ──────────────────────────────────────────────────────────────
+  // ⚠️ 这里踩过坑：页面顶部的「查询方式：车号 配属段 厂家」同样满足
+  //    「含车号 + 含业务列名」，所以它也是表头候选。
+  //    早期版本取**最后一个**候选，结果当页面靠后还有一处类似行时，
+  //    headIdx 就落在数据之后 → 解析出 0 行（页面却写着 739 条）。
+  //    现在改成：给每个候选打分 = 它后面连续像数据行的行数，取分最高的那个。
+  const headKeys = <String>['配属', '转向架', '定员', '机务段', '备注', '厂家'];
+  var headIdx = -1;
+  var bestScore = -1;
+  for (var i = 0; i < all.length; i++) {
+    final c = all[i];
+    if (!c.any((t) => t.contains('车号'))) continue;
+    if (!c.any((t) => headKeys.any((k) => t.contains(k)))) continue;
+    if (c.any(_isPaSSearchJunkRow)) continue; // 查询表单行也算 junk
+    var score = 0;
+    for (var j = i + 1; j < all.length; j++) {
+      if (_psIsDataRow(all[j], strict: false)) {
+        score++;
+      } else if (score > 0 && all[j].any((t) => t.contains('车号'))) {
+        break; // 撞上下一个表头就停
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      headIdx = i;
+    }
+  }
+
+  final header = <String, int>{};
+  if (headIdx >= 0) {
+    final hc = all[headIdx];
+    for (var i = 0; i < hc.length; i++) {
+      if (hc[i].isEmpty) continue;
+      header.putIfAbsent(hc[i], () => i);
+    }
+  }
+
+  // 服务端声明了 N>0 条时放宽过滤：它说有数据，我们就别把数据筛没了
+  final strict = declared == null || declared <= 0;
+
+  final rows = <List<String>>[];
+  if (headIdx >= 0) {
+    for (var i = headIdx + 1; i < all.length; i++) {
+      if (_psIsDataRow(all[i], strict: strict)) rows.add(all[i]);
+    }
+  }
+
+  // ── 兜底：表头定位失败（或定位错了）时，全表扫一遍 ──────────────────────
+  // 宁可多扫几行，也不要在「页面明明写着 N 条」时返回 0 行。
+  if (rows.isEmpty) {
+    for (var i = 0; i < all.length; i++) {
+      if (i == headIdx) continue;
+      if (_psIsDataRow(all[i], strict: false)) rows.add(all[i]);
+    }
+  }
+  return _HtmlTable(header: header, rows: rows);
+}
+
+/// 解析失败时给用户的现场证据：前若干行 + 最后几行的单元格内容
+/// （用同一套 _htmlRows 切分，保证打出来的就是解析器实际看到的东西）
+String _psTableDebug(String body) {
+  final all = _htmlRows(body);
+  final sb = StringBuffer();
+  for (var i = 0; i < all.length && i < 8; i++) {
+    sb.writeln('第${i + 1}行[${all[i].length}格]: ${all[i].join(' | ')}');
+  }
+  if (all.length > 8) {
+    sb.writeln('（共 ${all.length} 行，以下为最后 2 行）');
+    for (var i = all.length - 2; i < all.length; i++) {
+      if (i < 8) continue;
+      sb.writeln('第${i + 1}行[${all[i].length}格]: ${all[i].join(' | ')}');
+    }
+  }
+  return sb.toString();
+}
+
+/// 单元格纯文本：去标签、去实体
+String _htmlText(String raw) {
+  var s = raw.replaceAll(RegExp(r'<[^>]*>'), '');
+  s = s
+      .replaceAll(RegExp(r'&nbsp;?|&#160;?'), ' ')
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"');
+  return s.replaceAll(RegExp(r'\s+'), ' ').trim();
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2340,6 +3429,24 @@ _LateInfo? _parseLate(String body) {
   return null;
 }
 
+/// 车组号写法的候选列表，按命中概率排序：
+///   CR400BF-5033 → [CR400BF-5033, CR400BF5033]
+///   CR400BF5033  → [CR400BF5033, CR400BF-5033]
+/// 两个数据源对横杠的容忍度不一致，两边都拿候选列表去试最稳。
+List<String> _emuNoVariants(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return const <String>[];
+  final out = <String>[s];
+  if (s.contains('-')) {
+    final noDash = s.replaceAll('-', '');
+    if (noDash.isNotEmpty) out.add(noDash);
+  } else {
+    final dashed = _prettyEmuNo(s);
+    if (dashed != s) out.add(dashed);
+  }
+  return out;
+}
+
 /// rail.re 的车组号是 CR400AF2031（无横杠），补成 CR400AF-2031
 String _prettyEmuNo(String raw) {
   final s = raw.trim();
@@ -2373,6 +3480,7 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
   final TextEditingController _trainNoCtrl = TextEditingController();
   final TextEditingController _emuCtrl = TextEditingController();
 
+
   bool _loading = false;
   String? _error;
   String _notice = '';
@@ -2389,6 +3497,16 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
   bool _boardLoadingMore = false;
   /// 大屏时段筛选：0 = 全部，1~4 对应 _kBoardSlots
   int _boardSlot = 0;
+  // 普速配属：车厢 / 机车是两个独立分栏，各有各的关键字、维度、结果
+  _PsTab _psTab = _PsTab.car;
+  final TextEditingController _psCarCtrl = TextEditingController();
+  final TextEditingController _psLocoCtrl = TextEditingController();
+  String _psCarType = 'train';
+  String _psLocoType = 'model';
+  _CarPart? _psCarResult;
+  _LocoPart? _psLocoResult;
+  /// 普速「加载更多」进行中
+  bool _psLoadingMore = false;
 
   bool _stationsReady = false;
 
@@ -2413,6 +3531,8 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
     _toCtrl.dispose();
     _trainNoCtrl.dispose();
     _emuCtrl.dispose();
+    _psCarCtrl.dispose();
+    _psLocoCtrl.dispose();
     super.dispose();
   }
 
@@ -2461,6 +3581,13 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
       _detail = null;
       _stationTrains = <_StationTrain>[];
       _emuResult = null;
+      // 只清当前栏：切到另一栏时之前的结果还在，不需要重查
+      if (_psTab == _PsTab.car) {
+        _psCarResult = null;
+      } else {
+        _psLocoResult = null;
+      }
+      _psLoadingMore = false;
       _boardResult = null;
       _boardSlot = 0;
       _boardLoadingMore = false;
@@ -2502,6 +3629,37 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             forceRefresh: _forceRefresh,
           );
           if (mounted) setState(() => _emuResult = r);
+          break;
+
+        case _SearchMode.ordinary:
+          // 车厢 / 机车是两个独立分栏，只查当前栏，各存各的结果
+          if (_psTab == _PsTab.car) {
+            final kw = _psCarCtrl.text.trim();
+            if (kw.isEmpty) throw Exception('请输入查询关键字');
+            final r = await _api.queryCarStock(
+              kw,
+              _psCarType,
+              forceRefresh: _forceRefresh,
+            );
+            if (mounted) {
+              setState(() {
+                _psCarResult = r;
+              });
+            }
+          } else {
+            final kw = _psLocoCtrl.text.trim();
+            if (kw.isEmpty) throw Exception('请输入查询关键字');
+            final r = await _api.queryLocoStock(
+              kw,
+              _psLocoType,
+              forceRefresh: _forceRefresh,
+            );
+            if (mounted) {
+              setState(() {
+                _psLocoResult = r;
+              });
+            }
+          }
           break;
 
         case _SearchMode.station:
@@ -2633,20 +3791,14 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
     ));
   }
 
-  /// 从车次详情里点车组号过来：切到车组号页并直接查这个车组
+  /// 从车次详情 / 车组号结果里点车组号：
+  /// 进下一级页面查这个车组，当前页结果原样保留，返回即可回到来处
   void _openEmuSearch(String emuNo) {
-    setState(() {
-      _mode = _SearchMode.emuNo;
-      _emuCtrl.text = emuNo;
-      _error = null;
-      _notice = '';
-      _runs = <_TrainRun>[];
-      _detail = null;
-      _stationTrains = <_StationTrain>[];
-      _emuResult = null;
-      _boardResult = null;
-    });
-    _search();
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _EmuSearchPage(initialKeyword: emuNo),
+      ),
+    );
   }
 
   Widget _buildFilterRow() {
@@ -2684,7 +3836,10 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
       body: Column(
         children: [
           _buildModeSwitch(),
-          _buildDateRow(),
+          // 车组号查的是历史担当记录、普速查的是配属档案，
+          // 两者数据源都不接受日期，摆个日期选择器容易让人以为结果被按日期过滤了
+          if (_mode != _SearchMode.emuNo && _mode != _SearchMode.ordinary)
+            _buildDateRow(),
           _buildInputArea(),
           if (_mode == _SearchMode.stationToStation) _buildFilterRow(),
           _buildSearchButton(),
@@ -2721,6 +3876,11 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             icon: Icon(Icons.place),
             label: Text('车站'),
           ),
+          ButtonSegment(
+            value: _SearchMode.ordinary,
+            icon: Icon(Icons.railway_alert),
+            label: Text('普速'),
+          ),
         ],
         selected: <_SearchMode>{_mode},
         onSelectionChanged: (s) => setState(() {
@@ -2731,6 +3891,8 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
           _detail = null;
           _stationTrains = <_StationTrain>[];
           _emuResult = null;
+          _psCarResult = null;
+          _psLocoResult = null;
           _boardResult = null;
         }),
       ),
@@ -2832,8 +3994,146 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             stations: _api.stations,
           ),
         );
+
+      case _SearchMode.ordinary:
+        return _buildPasInputArea();
     }
     return const SizedBox.shrink();
+  }
+
+  /// 普速查询的输入区：车厢 / 机车两个分栏，
+  /// 各自有关键字与「按什么维度查」，互不干扰
+  Widget _buildPasInputArea() {
+    final isCar = _psTab == _PsTab.car;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SegmentedButton<_PsTab>(
+            segments: const <ButtonSegment<_PsTab>>[
+              ButtonSegment(
+                value: _PsTab.car,
+                icon: Icon(Icons.airline_seat_recline_normal, size: 18),
+                label: Text('车厢'),
+              ),
+              ButtonSegment(
+                value: _PsTab.loco,
+                icon: Icon(Icons.directions_railway, size: 18),
+                label: Text('机车'),
+              ),
+            ],
+            selected: <_PsTab>{_psTab},
+            onSelectionChanged: (s) => setState(() {
+              _psTab = s.first;
+              _error = null;
+            }),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              const Text('按', style: TextStyle(fontSize: 13)),
+              const SizedBox(width: 6),
+              SizedBox(
+                width: 124,
+                height: 48,
+                child: _psTypeDropdown(
+                  value: isCar ? _psCarType : _psLocoType,
+                  options: isCar ? _kPasCarTypes : _kPasLocoTypes,
+                  onChanged: (v) => setState(() {
+                    if (isCar) {
+                      _psCarType = v;
+                    } else {
+                      _psLocoType = v;
+                    }
+                  }),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: TextField(
+                  controller: isCar ? _psCarCtrl : _psLocoCtrl,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: (_) => _search(),
+                  decoration: InputDecoration(
+                    prefixIcon: Icon(
+                      isCar
+                          ? Icons.airline_seat_recline_normal
+                          : Icons.directions_railway,
+                      size: 20,
+                    ),
+                    hintText: isCar
+                        ? (_kPasCarHint[_psCarType] ?? '关键字')
+                        : (_kPasLocoHint[_psLocoType] ?? '关键字'),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(2, 6, 2, 0),
+            child: Text(
+              isCar
+                  ? '数据源 cr400bf.passearch.info　按「${_kPasCarTypes[_psCarType]}」查'
+                  : '数据源 loco.passearch.info　按「${_kPasLocoTypes[_psLocoType]}」查'
+                      '　⚠️ 型号维度请输 HXD3D，输完整车号 HXD3D0001 会返回 0 条',
+              style: TextStyle(
+                fontSize: 11,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 查询维度下拉。
+  ///
+  /// ⚠️ 别给 TextStyle 硬编码而不写 color：DropdownButton 会用这个 style 覆盖主题色，
+  ///    深色模式下就变成黑底黑字、一个字都看不见。颜色一律从 colorScheme 取。
+  ///    同理 dropdownColor 也得给，否则弹出层是默认纸白、深色模式下看不清。
+  Widget _psTypeDropdown({
+    required String value,
+    required Map<String, String> options,
+    required void Function(String) onChanged,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        border: Border.all(color: cs.outlineVariant),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          isExpanded: true,
+          isDense: true,
+          style: TextStyle(fontSize: 13, color: cs.onSurface),
+          dropdownColor: cs.surface,
+          icon: Icon(Icons.arrow_drop_down, color: cs.onSurfaceVariant),
+          items: options.entries
+              .map(
+                (e) => DropdownMenuItem<String>(
+                  value: e.key,
+                  child: Text(
+                    e.value,
+                    style: TextStyle(fontSize: 13, color: cs.onSurface),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              )
+              .toList(),
+          onChanged: (v) {
+            if (v != null) onChanged(v);
+          },
+        ),
+      ),
+    );
   }
 
   Widget _singleField({
@@ -2926,9 +4226,10 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
         children: [
           const Icon(Icons.error_outline, size: 40, color: Colors.redAccent),
           const SizedBox(height: 8),
+          // SelectableText：错误信息里可能带排查用的细节，方便长按复制
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: Text(_error!, textAlign: TextAlign.center),
+            child: SelectableText(_error!, textAlign: TextAlign.center),
           ),
           const SizedBox(height: 8),
           const Text(
@@ -2949,6 +4250,20 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
               '如 CR400AF-2031 / CRH2A-2001 / G83');
         }
         return _emuResultView(r);
+
+      case _SearchMode.ordinary:
+        if (_psTab == _PsTab.car) {
+          final r = _psCarResult;
+          if (r == null) {
+            return _empty('输入车次或车型后点击查询\n如 Z155 / YW25T');
+          }
+          return _psCarListView(r);
+        }
+        final r = _psLocoResult;
+        if (r == null) {
+          return _empty('输入机车型号或配属段后点击查询\n如 HXD3D / 京局京段');
+        }
+        return _psLocoListView(r);
 
       case _SearchMode.stationToStation:
         final list = _visibleRuns;
@@ -3137,6 +4452,10 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             d,
             // 点车组号 → 跳到车组号查询，看它的完整交路
             onPickEmu: (emuNo) => _openEmuSearch(emuNo),
+            // 普速车次才有车厢配属可查（动车组的车体不在这个数据源里）
+            onPickCarStock: d.isEmu
+                ? null
+                : () => _openPsPage(context, d.trainCode),
           ),
         ),
         _trainDetailFooter(context, d),
@@ -3176,31 +4495,18 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
   Widget _emuResultView(_EmuResult r) {
     final cs = Theme.of(context).colorScheme;
     final profiles = r.profiles;
-    // 车次查询：先按车组号聚合，一眼看到近期用过哪些车
-    final groups = r.isTrainQuery ? _groupByEmu(r.records) : const <_EmuGroup>[];
 
     return ListView(
       padding: const EdgeInsets.all(12),
       children: <Widget>[
-        if (r.isTrainQuery && groups.isNotEmpty) ...<Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
-            child: Text(
-              '${r.keyword.toUpperCase()}　近期担当车组 ${groups.length} 组'
-              '（共 ${r.records.length} 条记录）',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
-                  color: cs.onSurface),
-            ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
+          child: Text(
+            '${r.keyword.toUpperCase()}　担当明细 ${r.records.length} 条'
+            '（社区数据源历史数据，不按日期过滤）',
+            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
           ),
-          ...groups.map(
-            (g) => _emuGroupCard(
-              context,
-              g,
-              (emuNo) => _openEmuSearch(emuNo),
-            ),
-          ),
-          const SizedBox(height: 10),
-        ],
+        ),
         ...profiles.map((p) => Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: _buildEmuProfileCard(context, p),
@@ -3210,19 +4516,7 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             padding: EdgeInsets.all(24),
             child: Text('暂无担当记录', textAlign: TextAlign.center),
           ),
-        // if (r.records.isNotEmpty) ...<Widget>[
-        //   Padding(
-        //     padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
-        //     child: Text(
-        //       r.isTrainQuery
-        //           ? '担当明细 ${r.records.length} 条'
-        //               '（含各车组担当的其他车次）'
-        //           : '近期担当 ${r.records.length} 条',
-        //       style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-        //     ),
-        //   ),
-        //   ...r.records.map(_emuRecordCard),
-        // ],
+        ...r.records.map(_emuRecordCard),
         if (r.errors.isNotEmpty) ...<Widget>[
           const SizedBox(height: 10),
           Padding(
@@ -3251,8 +4545,195 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
   Widget _emuProfileCard(_EmuProfile p) =>
       _buildEmuProfileCard(context, p);
 
-  Widget _emuRecordCard(_EmuRecord r) =>
-      _buildEmuRecordCard(context, r, (code) => _openTrainDetail(code, null));
+  // ── 普速配属结果（车厢 / 机车各一个列表）────────────────────────────────
+
+  /// 普速「加载更多」：只翻当前栏
+  Future<void> _loadMorePs() async {
+    if (_psLoadingMore) return;
+    if (_psTab == _PsTab.car) {
+      final cur = _psCarResult;
+      if (cur == null || !cur.hasMore) return;
+      if (mounted) setState(() => _psLoadingMore = true);
+      try {
+        final more = await _api.queryCarStock(
+          _psCarCtrl.text.trim(),
+          cur.type,
+          loadMore: true,
+          previous: cur,
+        );
+        if (mounted) setState(() => _psCarResult = more);
+      } catch (e) {
+        if (mounted) _psToast('加载更多失败：${_cleanErr(e)}');
+      } finally {
+        if (mounted) setState(() => _psLoadingMore = false);
+      }
+      return;
+    }
+    final cur = _psLocoResult;
+    if (cur == null || !cur.hasMore) return;
+    if (mounted) setState(() => _psLoadingMore = true);
+    try {
+      final more = await _api.queryLocoStock(
+        _psLocoCtrl.text.trim(),
+        cur.type,
+        loadMore: true,
+        previous: cur,
+      );
+      if (mounted) setState(() => _psLocoResult = more);
+    } catch (e) {
+      if (mounted) _psToast('加载更多失败：${_cleanErr(e)}');
+    } finally {
+      if (mounted) setState(() => _psLoadingMore = false);
+    }
+  }
+
+  void _psToast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  /// 列表共用的「加载更多 / 到底了」尾部
+  Widget _psLoadMoreFooter(bool hasMore) {
+    if (!hasMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 14),
+        child: Center(
+          child: Text('已全部加载',
+              style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: _psLoadingMore
+          ? const Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          : OutlinedButton.icon(
+              onPressed: _loadMorePs,
+              icon: const Icon(Icons.expand_more, size: 18),
+              label: const Text('加载更多'),
+            ),
+    );
+  }
+
+  Widget _psCarListView(_CarPart r) {
+    final cs = Theme.of(context).colorScheme;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 16),
+      children: <Widget>[
+        _psListHeader(
+          count: r.items.length,
+          total: r.total,
+          dim: _kPasCarTypes[r.type] ?? r.type,
+          error: r.error,
+          color: cs.primary,
+        ),
+        if (r.items.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(
+              child: Text('无车厢配属记录',
+                  style: TextStyle(fontSize: 13, color: Colors.grey)),
+            ),
+          ),
+        ...List<Widget>.generate(
+          r.items.length,
+          (i) => _buildCarCard(context, r.items[i], index: i + 1),
+        ),
+        if (r.items.isNotEmpty) _psLoadMoreFooter(r.hasMore),
+      ],
+    );
+  }
+
+  Widget _psLocoListView(_LocoPart r) {
+    final cs = Theme.of(context).colorScheme;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 16),
+      children: <Widget>[
+        _psListHeader(
+          count: r.items.length,
+          total: r.total,
+          dim: _kPasLocoTypes[r.type] ?? r.type,
+          error: r.error,
+          color: cs.tertiary,
+        ),
+        if (r.items.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(
+              child: Text('无机车配属记录',
+                  style: TextStyle(fontSize: 13, color: Colors.grey)),
+            ),
+          ),
+        ...List<Widget>.generate(
+          r.items.length,
+          (i) => _buildLocoCard(context, r.items[i], index: i + 1),
+        ),
+        if (r.items.isNotEmpty) _psLoadMoreFooter(r.hasMore),
+      ],
+    );
+  }
+
+  /// 列表顶部：条数 + 命中维度 + 错误
+  Widget _psListHeader({
+    required int count,
+    required int? total,
+    required String dim,
+    required String? error,
+    required Color color,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(Icons.filter_alt_outlined, size: 14, color: color),
+              const SizedBox(width: 5),
+              Text(
+                '按「$dim」查',
+                style:
+                    TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              Text(
+                total != null && total > count
+                    ? '共 $total 条 · 已加载 $count'
+                    : '$count 条',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(error,
+                  style: const TextStyle(fontSize: 11, color: Colors.orange)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emuRecordCard(_EmuRecord r) => _buildEmuRecordCard(
+        context,
+        r,
+        (code) => _openTrainDetail(code, null),
+        onPickEmu: _openEmuSearch,
+      );
 
   // ── 车站大屏 ────────────────────────────────────────────────────────────
 
@@ -3468,84 +4949,6 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
   }
 }
 
-/// 按车组号聚合后的担当统计（车次查询时用）
-class _EmuGroup {
-  final String emuNo;
-  final int count;
-  final String lastDate;
-  final String firstDate;
-  final List<String> trainCodes;
-
-  const _EmuGroup({
-    required this.emuNo,
-    required this.count,
-    required this.lastDate,
-    required this.firstDate,
-    required this.trainCodes,
-  });
-}
-
-/// 把担当记录按车组号聚合（records 必须已按日期倒序）
-List<_EmuGroup> _groupByEmu(List<_EmuRecord> records) {
-  final order = <String>[];
-  final map = <String, List<_EmuRecord>>{};
-  for (final r in records) {
-    if (r.emuNo.isEmpty) continue;
-    final list = map.putIfAbsent(r.emuNo, () {
-      order.add(r.emuNo);
-      return <_EmuRecord>[];
-    });
-    list.add(r);
-  }
-  return order.map((emu) {
-    final list = map[emu]!;
-    list.sort((a, b) => b.date.compareTo(a.date));
-    final codes = <String>[];
-    for (final r in list) {
-      if (r.trainCode.isNotEmpty && !codes.contains(r.trainCode)) {
-        codes.add(r.trainCode);
-      }
-    }
-    return _EmuGroup(
-      emuNo: emu,
-      count: list.length,
-      lastDate: list.first.date,
-      firstDate: list.last.date,
-      trainCodes: codes,
-    );
-  }).toList();
-}
-
-/// 车次查询里的一张「车组号卡片」：车组号 + 担当次数 + 最近日期，可点进去查
-Widget _emuGroupCard(
-  BuildContext context,
-  _EmuGroup g,
-  void Function(String emuNo)? onPick,
-) {
-  final cs = Theme.of(context).colorScheme;
-  final dateText = g.lastDate.isEmpty
-      ? '日期未知'
-      : (g.firstDate.isNotEmpty && g.firstDate != g.lastDate)
-          ? '${g.firstDate} ~ ${g.lastDate}'
-          : g.lastDate;
-  return Card(
-    child: ListTile(
-      dense: true,
-      leading: const Icon(Icons.directions_railway, size: 20),
-      title: Text(
-        g.emuNo,
-        style: const TextStyle(fontWeight: FontWeight.bold),
-      ),
-      subtitle: Text(
-        '担当 ${g.count} 次　$dateText',
-        style: const TextStyle(fontSize: 12, color: Colors.grey),
-      ),
-      trailing: const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
-      onTap: onPick == null ? null : () => onPick(g.emuNo),
-    ),
-  );
-}
-
 // ───────────────────────────────────────────────────────────────────────────
 // 车组号卡片（顶层函数：主页结果、速查弹窗共用）
 // ───────────────────────────────────────────────────────────────────────────
@@ -3611,10 +5014,13 @@ Widget _buildEmuProfileCard(BuildContext context, _EmuProfile p) {
 Widget _buildEmuRecordCard(
   BuildContext context,
   _EmuRecord r,
-  void Function(String trainCode)? onPickTrain,
-) {
+  void Function(String trainCode)? onPickTrain, {
+  // 车组号可点：不额外加控件，直接让这行文字可点，跳下一级查这台车
+  void Function(String emuNo)? onPickEmu,
+}) {
   final cs = Theme.of(context).colorScheme;
   final isCrh = r.source == _EmuSource.crhTracker;
+  final canPickEmu = onPickEmu != null && r.emuNo.isNotEmpty;
   return Card(
       child: ListTile(
         dense: true,
@@ -3625,7 +5031,29 @@ Widget _buildEmuRecordCard(
             style: const TextStyle(fontWeight: FontWeight.bold),
           ),
         ),
-        title: Text(r.emuNo, style: const TextStyle(fontSize: 13)),
+        title: canPickEmu
+            ? GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => onPickEmu(r.emuNo),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Flexible(
+                      child: Text(
+                        r.emuNo,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: cs.primary,
+                          decoration: TextDecoration.underline,
+                          decorationColor: cs.primary.withOpacity(0.4),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            : Text(r.emuNo, style: const TextStyle(fontSize: 13)),
         subtitle: Text(
           r.date.isEmpty ? '日期未知' : r.date,
           style: const TextStyle(fontSize: 12, color: Colors.grey),
@@ -3986,6 +5414,8 @@ Widget _buildTrainDetailBody(
   bool compactHeader = false,
   /// 点击车组号时回调（车次查询页可用来跳转到车组号查询）
   void Function(String emuNo)? onPickEmu,
+  /// 点「车厢配属」时回调（普速车次才有意义，调用方决定要不要给）
+  VoidCallback? onPickCarStock,
 }) {
   final cs = Theme.of(context).colorScheme;
   return Column(
@@ -4013,6 +5443,18 @@ Widget _buildTrainDetailBody(
               '共 ${d.stops.length} 站',
               style: const TextStyle(fontSize: 12, color: Colors.grey),
             ),
+            if (onPickCarStock != null) ...<Widget>[
+              const SizedBox(width: 8),
+              TextButton.icon(
+                onPressed: onPickCarStock,
+                icon: const Icon(Icons.railway_alert, size: 16),
+                label: const Text('车厢配属'),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -4214,145 +5656,744 @@ class _NoGlowScrollBehavior extends ScrollBehavior {
   }
 }
 
-/// 车组号速查弹窗：在经停详情页点车组号时用，展示配属 + 近期担当
-Future<void> _showEmuSheet(BuildContext context, String emuNo) {
-  return showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    builder: (_) => _EmuQuickSheet(emuNo: emuNo),
+// ───────────────────────────────────────────────────────────────────────────
+// 车组号 / 车次担当查询（独立页面，作为下一级界面 push 进来）
+// ───────────────────────────────────────────────────────────────────────────
+
+/// 从车次经停详情里点车组号：进下一级页面，按返回回到原来的详情页
+Future<void> _openEmuPage(BuildContext context, String emuNo) {
+  return Navigator.of(context).push<void>(
+    MaterialPageRoute<void>(
+      builder: (_) => _EmuSearchPage(initialKeyword: emuNo),
+    ),
   );
 }
 
-class _EmuQuickSheet extends StatefulWidget {
-  final String emuNo;
-  const _EmuQuickSheet({required this.emuNo});
+/// 车组号 / 车次担当查询页。
+///
+/// 注意：这里**不按日期过滤**——车组担当来自 rail.re / OpenCRHTracker 的
+/// 历史记录，数据源本身也不接受日期参数，硬套日期只会让结果看起来是空的。
+class _EmuSearchPage extends StatefulWidget {
+  /// 进入即查询的关键词（外部点车组号跳转时带上）
+  final String initialKeyword;
+
+  const _EmuSearchPage({this.initialKeyword = ''});
 
   @override
-  State<_EmuQuickSheet> createState() => _EmuQuickSheetState();
+  State<_EmuSearchPage> createState() => _EmuSearchPageState();
 }
 
-class _EmuQuickSheetState extends State<_EmuQuickSheet> {
+class _EmuSearchPageState extends State<_EmuSearchPage> {
   final _RailwayApi _api = _RailwayApi.instance;
-  bool _loading = true;
+  late final TextEditingController _ctrl;
+  bool _loading = false;
   String? _error;
   _EmuResult? _result;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _ctrl = TextEditingController(text: widget.initialKeyword);
+    if (widget.initialKeyword.trim().isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
   }
 
   Future<void> _load({bool force = false}) async {
+    final kw = _ctrl.text.trim();
+    if (kw.isEmpty) {
+      setState(() => _error = '请输入车组号或车次');
+      return;
+    }
+    FocusScope.of(context).unfocus();
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      final r = await _api.queryEmu(widget.emuNo, forceRefresh: force);
+      final r = await _api.queryEmu(kw, forceRefresh: force);
       if (mounted) setState(() => _result = r);
     } catch (e) {
-      if (mounted) setState(() => _error = _cleanErr(e));
+      if (mounted) {
+        setState(() {
+          _error = _cleanErr(e);
+          _result = null;
+        });
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
+  /// 点车组号 → 再进一层，返回键一层层往上退
+  void _drillDown(String emuNo) => _openEmuPage(context, emuNo);
+
+  /// 点车次 → 进经停时刻表页。
+  /// 尽量用这条担当记录本身的日期；早于今天的话 12306 查不到，退回今天。
+  void _openTrain(String trainCode) {
+    var date = _today();
+    final r = _result;
+    if (r != null) {
+      for (final x in r.records) {
+        if (x.trainCode != trainCode || x.date.length < 10) continue;
+        final d = DateTime.tryParse(x.date.substring(0, 10));
+        if (d != null) {
+          date = d;
+          break;
+        }
+      }
+    }
+    if (date.isBefore(_today())) date = _today();
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => _TrainDetailPage(
+          trainCode: trainCode,
+          trainNo: null,
+          date: date,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final r = _result;
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.7,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-              child: Row(
-                children: <Widget>[
-                  const Icon(Icons.directions_railway, size: 18),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      widget.emuNo,
-                      style: const TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.bold,
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('车组号查询'),
+        actions: <Widget>[
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: '忽略缓存重新查询',
+            onPressed: _loading ? null : () => _load(force: true),
+          ),
+        ],
+      ),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: TextField(
+              controller: _ctrl,
+              textInputAction: TextInputAction.search,
+              onSubmitted: (_) => _load(),
+              decoration: InputDecoration(
+                prefixIcon: const Icon(Icons.directions_railway),
+                hintText: '车组号或车次，如 CR400AF-2031 / G83',
+                border: const OutlineInputBorder(),
+                isDense: true,
+                suffixIcon: _loading
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : IconButton(
+                        icon: const Icon(Icons.search),
+                        onPressed: _load,
                       ),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+            child: Text(
+              '担当记录为社区数据源的历史数据，不按日期过滤；'
+              '点车组号继续下钻，点车次看经停时刻表。',
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(child: _buildBody()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    final cs = Theme.of(context).colorScheme;
+    final r = _result;
+
+    if (_loading && r == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(
+            _error!,
+            textAlign: TextAlign.center,
+            style: TextStyle(color: cs.error),
+          ),
+        ),
+      );
+    }
+    if (r == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            '输入车组号或车次开始查询',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+        ),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
+          child: Text(
+            '${r.keyword.toUpperCase()}　担当明细 ${r.records.length} 条'
+            '（按日期倒序）',
+            style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+          ),
+        ),
+        ...r.profiles.map(
+          (p) => Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: _buildEmuProfileCard(context, p),
+          ),
+        ),
+        ...r.records.map(
+          (x) => _buildEmuRecordCard(context, x, _openTrain,
+              onPickEmu: _drillDown),
+        ),
+        if (r.records.isEmpty && r.profiles.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              '暂无担当记录',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+          ),
+        if (r.errors.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 10),
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Text(
+              '部分数据源未返回：\n${r.errors.join('\n')}',
+              style: const TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+          ),
+        ],
+        const SizedBox(height: 8),
+        const Padding(
+          padding: EdgeInsets.all(8),
+          child: Text(
+            '数据来源 rail.re（Arnie97/moerail）与 '
+            'OpenCRHTracker（lihugang/OpenCRHTracker），'
+            '均为社区维护，仅供参考。',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 普速配属查询（独立页面，作为下一级界面 push 进来）
+// ───────────────────────────────────────────────────────────────────────────
+
+/// 从车次详情里点「车厢配属」：进下一级页面，按返回回到原来的详情页。
+/// 默认停在「车厢」栏并带上车次号，进来后可以切到机车或改维度。
+Future<void> _openPsPage(BuildContext context, String keyword) {
+  return Navigator.of(context).push<void>(
+    MaterialPageRoute<void>(
+      builder: (_) => _PsSearchPage(initialKeyword: keyword),
+    ),
+  );
+}
+
+/// 普速配属查询页：车厢（cr400bf.passearch.info）+ 机车（loco.passearch.info）
+///
+/// 两个站都只有 HTML 表格，靠硬解析取数；每页固定 50 条。
+/// 两栏各自独立：关键字、维度、结果、翻页都分开。
+class _PsSearchPage extends StatefulWidget {
+  /// 进入即查询的关键词（从车次详情跳转时带车次号）
+  final String initialKeyword;
+
+  const _PsSearchPage({this.initialKeyword = ''});
+
+  @override
+  State<_PsSearchPage> createState() => _PsSearchPageState();
+}
+
+class _PsSearchPageState extends State<_PsSearchPage> {
+  final _RailwayApi _api = _RailwayApi.instance;
+  late final TextEditingController _carCtrl;
+  late final TextEditingController _locoCtrl;
+  _PsTab _tab = _PsTab.car;
+  String _carType = 'train';
+  String _locoType = 'model';
+  bool _loading = false;
+  bool _loadingMore = false;
+  String? _carError;
+  String? _locoError;
+  _CarPart? _carResult;
+  _LocoPart? _locoResult;
+
+  @override
+  void initState() {
+    super.initState();
+    _carCtrl = TextEditingController(text: widget.initialKeyword);
+    _locoCtrl = TextEditingController();
+    if (widget.initialKeyword.trim().isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    }
+  }
+
+  @override
+  void dispose() {
+    _carCtrl.dispose();
+    _locoCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load({bool force = false}) async {
+    final isCar = _tab == _PsTab.car;
+    final kw = (isCar ? _carCtrl.text : _locoCtrl.text).trim();
+    if (kw.isEmpty) {
+      setState(() {
+        if (isCar) {
+          _carError = '请输入查询关键字';
+        } else {
+          _locoError = '请输入查询关键字';
+        }
+      });
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _loading = true;
+      if (isCar) {
+        _carError = null;
+        _carResult = null;
+      } else {
+        _locoError = null;
+        _locoResult = null;
+      }
+    });
+    try {
+      if (isCar) {
+        final r =
+            await _api.queryCarStock(kw, _carType, forceRefresh: force);
+        if (mounted) setState(() => _carResult = r);
+      } else {
+        final r =
+            await _api.queryLocoStock(kw, _locoType, forceRefresh: force);
+        if (mounted) setState(() => _locoResult = r);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          if (isCar) {
+            _carError = _cleanErr(e);
+          } else {
+            _locoError = _cleanErr(e);
+          }
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_loadingMore) return;
+    final isCar = _tab == _PsTab.car;
+    if (isCar) {
+      final cur = _carResult;
+      if (cur == null || !cur.hasMore) return;
+      if (mounted) setState(() => _loadingMore = true);
+      try {
+        final more = await _api.queryCarStock(
+          _carCtrl.text.trim(),
+          cur.type,
+          loadMore: true,
+          previous: cur,
+        );
+        if (mounted) setState(() => _carResult = more);
+      } catch (e) {
+        if (mounted) _toast('加载更多失败：${_cleanErr(e)}');
+      } finally {
+        if (mounted) setState(() => _loadingMore = false);
+      }
+      return;
+    }
+    final cur = _locoResult;
+    if (cur == null || !cur.hasMore) return;
+    if (mounted) setState(() => _loadingMore = true);
+    try {
+      final more = await _api.queryLocoStock(
+        _locoCtrl.text.trim(),
+        cur.type,
+        loadMore: true,
+        previous: cur,
+      );
+      if (mounted) setState(() => _locoResult = more);
+    } catch (e) {
+      if (mounted) _toast('加载更多失败：${_cleanErr(e)}');
+    } finally {
+      if (mounted) setState(() => _loadingMore = false);
+    }
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final isCar = _tab == _PsTab.car;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('普速配属查询'),
+        actions: <Widget>[
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: '忽略缓存重新查询',
+            onPressed: _loading ? null : () => _load(force: true),
+          ),
+        ],
+      ),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: SegmentedButton<_PsTab>(
+              segments: const <ButtonSegment<_PsTab>>[
+                ButtonSegment(
+                  value: _PsTab.car,
+                  icon: Icon(Icons.airline_seat_recline_normal, size: 18),
+                  label: Text('车厢'),
+                ),
+                ButtonSegment(
+                  value: _PsTab.loco,
+                  icon: Icon(Icons.directions_railway, size: 18),
+                  label: Text('机车'),
+                ),
+              ],
+              selected: <_PsTab>{_tab},
+              onSelectionChanged: (s) => setState(() => _tab = s.first),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+            child: Row(
+              children: <Widget>[
+                const Text('按', style: TextStyle(fontSize: 13)),
+                const SizedBox(width: 6),
+                SizedBox(
+                  width: 124,
+                  height: 48,
+                  child: _buildPsDropdown(
+                    value: isCar ? _carType : _locoType,
+                    options: isCar ? _kPasCarTypes : _kPasLocoTypes,
+                    onChanged: (v) => setState(() {
+                      if (isCar) {
+                        _carType = v;
+                      } else {
+                        _locoType = v;
+                      }
+                    }),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: isCar ? _carCtrl : _locoCtrl,
+                    textInputAction: TextInputAction.search,
+                    onSubmitted: (_) => _load(),
+                    decoration: InputDecoration(
+                      prefixIcon: Icon(
+                        isCar
+                            ? Icons.airline_seat_recline_normal
+                            : Icons.directions_railway,
+                        size: 20,
+                      ),
+                      hintText: isCar
+                          ? (_kPasCarHint[_carType] ?? '关键字')
+                          : (_kPasLocoHint[_locoType] ?? '关键字'),
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                      suffixIcon: _loading
+                          ? const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            )
+                          : IconButton(
+                              icon: const Icon(Icons.search),
+                              onPressed: _load,
+                            ),
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.refresh, size: 20),
-                    tooltip: '忽略缓存重新查询',
-                    onPressed: _loading
-                        ? null
-                        : () => _load(force: true),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
-            const Divider(height: 1),
-            Expanded(
-              child: Builder(
-                builder: (context) {
-                  if (_loading && r == null) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-                  if (_error != null) {
-                    return Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Text(
-                          _error!,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: cs.error),
-                        ),
-                      ),
-                    );
-                  }
-                  if (r == null) return const SizedBox.shrink();
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+            child: Text(
+              isCar
+                  ? '数据源 cr400bf.passearch.info　按「${_kPasCarTypes[_carType]}」查'
+                  : '数据源 loco.passearch.info　按「${_kPasLocoTypes[_locoType]}」查'
+                      '　⚠️ 型号维度请输 HXD3D，输完整车号 HXD3D0001 会返回 0 条',
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(child: _buildBody()),
+        ],
+      ),
+    );
+  }
 
-                  final profile = r.profile;
-                  final recs = r.records.take(15).toList();
-                  return ListView(
-                    padding: const EdgeInsets.all(12),
-                    children: <Widget>[
-                      if (profile != null) _buildEmuProfileCard(context, profile),
-                      if (profile != null) const SizedBox(height: 10),
-                      if (recs.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Text(
-                            '暂无担当记录',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ),
-                      if (recs.isNotEmpty) ...<Widget>[
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(4, 2, 4, 6),
-                          child: Text(
-                            '近期担当（最多显示 15 条，共 ${r.records.length} 条）',
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: cs.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                        ...recs.map(
-                            (x) => _buildEmuRecordCard(context, x, null),),
-                      ],
-                    ],
-                  );
-                },
-              ),
-            ),
-          ],
+  /// 同主页面的 _psTypeDropdown：颜色必须从 colorScheme 取，
+  /// 否则深色模式下是黑底黑字，什么都看不见。
+  Widget _buildPsDropdown({
+    required String value,
+    required Map<String, String> options,
+    required void Function(String) onChanged,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        border: Border.all(color: cs.outlineVariant),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          isExpanded: true,
+          isDense: true,
+          style: TextStyle(fontSize: 13, color: cs.onSurface),
+          dropdownColor: cs.surface,
+          icon: Icon(Icons.arrow_drop_down, color: cs.onSurfaceVariant),
+          items: options.entries
+              .map(
+                (e) => DropdownMenuItem<String>(
+                  value: e.key,
+                  child: Text(
+                    e.value,
+                    style: TextStyle(fontSize: 13, color: cs.onSurface),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              )
+              .toList(),
+          onChanged: (v) {
+            if (v != null) onChanged(v);
+          },
         ),
       ),
+    );
+  }
+
+  Widget _buildBody() {
+    final cs = Theme.of(context).colorScheme;
+    final isCar = _tab == _PsTab.car;
+    final err = isCar ? _carError : _locoError;
+
+    if (_loading && (isCar ? _carResult : _locoResult) == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (err != null) {
+      // 错误信息里带了排查用的细节（HTTP 状态 / 服务端条数 / 扫到几个 <tr>），
+      // 用 SelectableText 方便长按复制出来看
+      return ListView(
+        padding: const EdgeInsets.all(24),
+        children: <Widget>[
+          SelectableText(
+            err,
+            style: TextStyle(color: cs.error, fontSize: 13),
+          ),
+        ],
+      );
+    }
+
+    if (isCar) {
+      final r = _carResult;
+      if (r == null) {
+        return const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              '选好「按什么查」，输入关键字后点击查询\n如 Z155 / 683046 / YW25T',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+          ),
+        );
+      }
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(10, 10, 10, 16),
+        children: <Widget>[
+          _buildPsListHeader(
+            count: r.items.length,
+            total: r.total,
+            dim: _kPasCarTypes[r.type] ?? r.type,
+            error: r.error,
+            color: cs.primary,
+          ),
+          if (r.items.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Center(
+                child: Text('无车厢配属记录',
+                    style: TextStyle(fontSize: 13, color: Colors.grey)),
+              ),
+            ),
+          ...List<Widget>.generate(
+            r.items.length,
+            (i) => _buildCarCard(context, r.items[i], index: i + 1),
+          ),
+          if (r.items.isNotEmpty) _buildLoadMoreFooter(r.hasMore),
+        ],
+      );
+    }
+
+    final r = _locoResult;
+    if (r == null) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text(
+            '选好「按什么查」，输入关键字后点击查询\n'
+            '机车请输型号 HXD3D（不是 HXD3D0001）或配属段 京局京段',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey),
+          ),
+        ),
+      );
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 16),
+      children: <Widget>[
+        _buildPsListHeader(
+          count: r.items.length,
+          total: r.total,
+          dim: _kPasLocoTypes[r.type] ?? r.type,
+          error: r.error,
+          color: cs.tertiary,
+        ),
+        if (r.items.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(
+              child: Text('无机车配属记录',
+                  style: TextStyle(fontSize: 13, color: Colors.grey)),
+            ),
+          ),
+        ...List<Widget>.generate(
+          r.items.length,
+          (i) => _buildLocoCard(context, r.items[i], index: i + 1),
+        ),
+        if (r.items.isNotEmpty) _buildLoadMoreFooter(r.hasMore),
+      ],
+    );
+  }
+
+  Widget _buildPsListHeader({
+    required int count,
+    required int? total,
+    required String dim,
+    required String? error,
+    required Color color,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(Icons.filter_alt_outlined, size: 14, color: color),
+              const SizedBox(width: 5),
+              Text(
+                '按「$dim」查',
+                style: TextStyle(
+                    fontSize: 12, color: color, fontWeight: FontWeight.w600),
+              ),
+              const Spacer(),
+              Text(
+                total != null && total > count
+                    ? '共 $total 条 · 已加载 $count'
+                    : '$count 条',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+          if (error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(error,
+                  style: const TextStyle(fontSize: 11, color: Colors.orange)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLoadMoreFooter(bool hasMore) {
+    if (!hasMore) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 14),
+        child: Center(
+          child: Text('已全部加载',
+              style: TextStyle(fontSize: 12, color: Colors.grey)),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: _loadingMore
+          ? const Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            )
+          : OutlinedButton.icon(
+              onPressed: _loadMore,
+              icon: const Icon(Icons.expand_more, size: 18),
+              label: const Text('加载更多'),
+            ),
     );
   }
 }
@@ -4492,7 +6533,9 @@ class _TrainDetailPageState extends State<_TrainDetailPage> {
                   d,
                   compactHeader: true,
                   // 独立页里点车组号 → 弹窗看它的配属与近期交路
-                  onPickEmu: (emuNo) => _showEmuSheet(context, emuNo),
+                  onPickEmu: (emuNo) => _openEmuPage(context, emuNo),
+                  onPickCarStock:
+                      d.isEmu ? null : () => _openPsPage(context, d.trainCode),
                 ),
               ),
               _trainDetailFooter(context, d),

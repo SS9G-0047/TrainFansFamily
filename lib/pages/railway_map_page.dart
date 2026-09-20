@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:warningapplication_1/widgets/maplibre_map.dart';
 
 import '../models/camera_position.dart';
 import '../services/camera_position_service.dart';
 import '../services/native_location_service.dart';
 import '../utils/map_config.dart';
-import '../widgets/railway_vector_layer.dart';
 
 class RailwayMapPage extends StatefulWidget {
   const RailwayMapPage({super.key});
@@ -18,15 +17,13 @@ class RailwayMapPage extends StatefulWidget {
 class _RailwayMapPageState extends State<RailwayMapPage> {
   final CameraPositionService _cameraService =
       CameraPositionService.instance;
-  final MapController _mapController = MapController();
+  final MapLibreController _mapController = MapLibreController();
 
   static const LatLng _initialCenter = LatLng(39.9042, 116.4074);
 
   LatLng? _myLocation;
   bool _showCameraPositions = false;
   bool _showMyLocation = false;
-
-  late final MapOptions _mapOptions;
 
   @override
   void initState() {
@@ -38,21 +35,12 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
     final gcj02Center =
         wgs84ToGcj02(_initialCenter.latitude, _initialCenter.longitude);
 
-    _mapOptions = MapOptions(
-      initialCenter: gcj02Center,
-      initialZoom: 12.0,
-      minZoom: 4.0,
-      maxZoom: 18.0,
-      interactionOptions: InteractionOptions(
-        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-      ),
-    );
+    _mapController.move(gcj02Center, 12.0);
   }
 
   @override
   void dispose() {
     _cameraService.removeListener(_onCameraServiceChanged);
-    _mapController.dispose();
     super.dispose();
   }
 
@@ -61,63 +49,36 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
     setState(() {});
   }
 
-  List<Marker> _buildCameraMarkers() {
+  List<MapMarker> _buildCameraMarkers() {
     if (!_showCameraPositions) return [];
 
     return _cameraService.positions.map((pos) {
       final gcj02 =
           wgs84ToGcj02(pos.latitude, pos.longitude);
 
-      return Marker(
+      return MapMarker(
         point: gcj02,
-        width: 28,
-        height: 28,
-        child: GestureDetector(
-          onTap: () => _showCameraPositionInfo(pos),
-          child: Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: const Color(0xFF673AB7),
-              border: Border.all(color: Colors.white, width: 2),
-              boxShadow: const [
-                BoxShadow(
-                  color: Colors.black26,
-                  blurRadius: 3,
-                ),
-              ],
-            ),
-            child: const Icon(
-              Icons.camera_alt,
-              color: Colors.white,
-              size: 16,
-            ),
-          ),
-        ),
+        color: Colors.red,
+        size: 28,
+        icon: '*',
+        id: pos.id,
+        hasClick: true,
+        onTap: () => _showCameraPositionInfo(pos),
       );
     }).toList();
   }
 
-  List<Marker> _buildMyLocationMarker() {
+  List<MapMarker> _buildMyLocationMarker() {
     if (!_showMyLocation || _myLocation == null) return [];
 
     final gcj02 =
         wgs84ToGcj02(_myLocation!.latitude, _myLocation!.longitude);
 
     return [
-      Marker(
+      MapMarker(
         point: gcj02,
-        width: 32,
-        height: 32,
-        child: Container(
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFF2196F3).withValues(alpha: 0.4),
-            border: Border.all(
-              color: Colors.white,
-              width: 3,
-            ),
-          ),
-        ),
+        color: Colors.red,
+        size: 32,
       ),
     ];
   }
@@ -135,32 +96,17 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
       ),
       body: Stack(
         children: [
-          FlutterMap(
-            mapController: _mapController,
-            options: _mapOptions,
-            children: [
-              TileLayer(
-                urlTemplate: amapTileUrlTemplate,
-                subdomains: amapSubdomains,
-                maxZoom: 18,
-                maxNativeZoom: 18,
-                tileBuilder: (context, tile, tileImage) =>
-                    ColorFiltered(
-                  colorFilter:
-                      const ColorFilter.matrix(
-                    amapGrayscaleMatrix,
-                  ),
-                  child: tile,
-                ),
-              ),
-              RailwayVectorLayer(),
-              MarkerLayer(
-                markers: [
-                  ..._buildCameraMarkers(),
-                  ..._buildMyLocationMarker(),
-                ],
-              ),
+          MapLibreMapWidget(
+            initialCenter: wgs84ToGcj02(
+              _initialCenter.latitude,
+              _initialCenter.longitude,
+            ),
+            initialZoom: 12,
+            markers: [
+              ..._buildCameraMarkers(),
+              ..._buildMyLocationMarker(),
             ],
+            controller: _mapController,
           ),
           Align(
             alignment: Alignment.topRight,
@@ -241,8 +187,7 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
     });
 
     if (moveToLocation) {
-      final currentZoom =
-          _mapController.camera.zoom;
+        final currentZoom = _mapController.zoom;
 
       final gcj02 = wgs84ToGcj02(
         point.latitude,
@@ -317,8 +262,7 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
   void _centerOnPosition(
     CameraPosition position,
   ) {
-    final currentZoom =
-        _mapController.camera.zoom;
+    final currentZoom = _mapController.zoom;
 
     final gcj02 = wgs84ToGcj02(
       position.latitude,

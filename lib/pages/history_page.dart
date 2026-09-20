@@ -2,10 +2,9 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:warningapplication_1/models/camera_position.dart' as cam_model;
-import 'package:warningapplication_1/widgets/railway_vector_layer.dart';
+import 'package:warningapplication_1/widgets/maplibre_map.dart';
 import '../models/warning_history_record.dart';
 import '../services/camera_position_service.dart';
 import '../services/warning_history_service.dart';
@@ -499,7 +498,7 @@ class HistoryRecordDetailPage extends StatefulWidget {
 }
 
 class _HistoryRecordDetailPageState extends State<HistoryRecordDetailPage> {
-  final MapController _mapController = MapController();
+  final MapLibreController _mapController = MapLibreController();
 
   late final List<WarningHistoryPoint> _validPoints;
   /// GCJ-02 坐标列表（已从 WGS-84 转换，用于地图显示）。
@@ -512,21 +511,11 @@ class _HistoryRecordDetailPageState extends State<HistoryRecordDetailPage> {
   bool _showAllPath = true;
 
   /// 当前地图上的线条（完整路径或动画路径）。
-  List<Polyline> _polylines = [];
-  /// 当前地图上的圆形标记列表。
-  List<CircleMarker> _circles = [];
+  List<MapPolyline> _polylines = [];
+  /// 当前地图上的标记列表。
+  List<MapMarker> _circles = [];
 
   static const double _defaultZoom = 14.0;
-
-  /// 缓存的 MapOptions — 避免每次 build 创建新实例。
-  ///
-  /// FlutterMap.didUpdateWidget 检测到 MapOptions 变化（按引用比较）后
-  /// 会调用 MapControllerImpl.options setter，创建新的 _MapControllerState
-  /// 并触发 notifyListeners()，导致 FlutterMap 及所有子 Widget（含
-  /// VectorTileLayer / TileLayer）全量 rebuild，干扰 tile loading 流程。
-  /// initialCenter 只在首次渲染时使用，后续 camera 位置由 MapController
-  /// 管理，不会受 initialCenter 影响。
-  late final MapOptions _mapOptions;
 
   @override
   void initState() {
@@ -540,18 +529,6 @@ class _HistoryRecordDetailPageState extends State<HistoryRecordDetailPage> {
     }
     _polylines = _buildPolylines();
     _circles = _buildCircles();
-
-    // 在 initState 中创建一次 MapOptions，后续 build 复用同一实例。
-    // initialCenter 使用默认北京坐标，实际位置由 post-frame callback 设置。
-    _mapOptions = MapOptions(
-      initialCenter: wgs84ToGcj02(39.9042, 116.4074),
-      initialZoom: _defaultZoom,
-      minZoom: 4.0,
-      maxZoom: 14.0,
-      interactionOptions: InteractionOptions(
-        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-      ),
-    );
 
     // 地图就绪后将中心移动到当前路径点。
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -601,85 +578,68 @@ class _HistoryRecordDetailPageState extends State<HistoryRecordDetailPage> {
   // ---------------------------------------------------------------------------
 
   /// 根据当前状态构建线条列表。
-  List<Polyline> _buildPolylines() {
+  List<MapPolyline> _buildPolylines() {
     if (_showAllPath && _validLatLngs.length > 1) {
       return [
-        Polyline(
+        MapPolyline(
           points: _validLatLngs,
           color: const Color(0xFF0000FF),
-          strokeWidth: 3.0,
+          width: 3.0,
         ),
       ];
     } else if (!_showAllPath && _animatedPathPoints.length > 1) {
       return [
-        Polyline(
+        MapPolyline(
           points: _animatedPathPoints,
           color: const Color(0xFF0000FF),
-          strokeWidth: 3.0,
+          width: 3.0,
         ),
       ];
     }
     return [];
   }
 
-  /// 根据当前状态构建圆形标记列表。
-  List<CircleMarker> _buildCircles() {
-    final List<CircleMarker> circles = [];
+  List<MapMarker> _buildCircles() {
+    final List<MapMarker> markers = [];
 
     final currentPoint =
         _validLatLngs.isEmpty ? null : _validLatLngs[_currentIndex];
 
-    // 当前车辆位置（红色）
     if (currentPoint != null) {
-      circles.add(CircleMarker(
+      markers.add(MapMarker(
         point: currentPoint,
-        radius: 8,
         color: const Color(0xFFFF0000),
-        borderColor: Colors.white,
-        borderStrokeWidth: 2,
-        useRadiusInMeter: false,
+        size: 16,
       ));
     }
 
-    // 机位位置（绿色）—— CameraPosition 模型坐标为 WGS-84，需转 GCJ-02
     final camera = _cameraPosition;
     if (camera != null) {
       final camGcj = wgs84ToGcj02(camera.latitude, camera.longitude);
-      circles.add(CircleMarker(
+      markers.add(MapMarker(
         point: camGcj,
-        radius: 8,
         color: const Color(0xFF4CAF50),
-        borderColor: Colors.white,
-        borderStrokeWidth: 2,
-        useRadiusInMeter: false,
+        size: 16,
       ));
     }
 
-    // 起点（蓝色）
     if (_validLatLngs.isNotEmpty) {
-      circles.add(CircleMarker(
+      markers.add(MapMarker(
         point: _validLatLngs.first,
-        radius: 6,
         color: const Color(0xFF0000FF),
-        borderColor: Colors.white,
-        borderStrokeWidth: 2,
-        useRadiusInMeter: false,
+        size: 12,
       ));
     }
 
-    // 终点（橙色）
     if (_validLatLngs.length > 1) {
-      circles.add(CircleMarker(
+      markers.add(MapMarker(
         point: _validLatLngs.last,
-        radius: 6,
         color: const Color(0xFFFF9800),
-        borderColor: Colors.white,
-        borderStrokeWidth: 2,
-        useRadiusInMeter: false,
+        size: 12,
       ));
     }
 
-    return circles;
+    return markers;
   }
 
   /// 更新声明式注解列表并触发重建。
@@ -694,7 +654,7 @@ class _HistoryRecordDetailPageState extends State<HistoryRecordDetailPage> {
   void _moveCameraToCurrent() {
     if (_validLatLngs.isEmpty) return;
     final currentPoint = _validLatLngs[_currentIndex];
-    _mapController.move(currentPoint, _mapController.camera.zoom);
+    _mapController.move(currentPoint, _mapController.zoom);
   }
 
   // ---------------------------------------------------------------------------
@@ -779,24 +739,12 @@ class _HistoryRecordDetailPageState extends State<HistoryRecordDetailPage> {
             height: 280,
             child: Stack(
               children: [
-                FlutterMap(
-                  mapController: _mapController,
-                  options: _mapOptions,
-                  children: [
-                    TileLayer(
-                      urlTemplate: amapTileUrlTemplate,
-                      subdomains: amapSubdomains,
-                      maxZoom: 18,
-                      maxNativeZoom: 18,
-                      tileBuilder: (context, tile, tileImage) => ColorFiltered(
-                        colorFilter: const ColorFilter.matrix(amapGrayscaleMatrix),
-                        child: tile,
-                      ),
-                    ),
-                    RailwayVectorLayer(),
-                    CircleLayer(circles: _circles),
-                    PolylineLayer(polylines: _polylines),
-                  ],
+                MapLibreMapWidget(
+                  initialCenter: wgs84ToGcj02(39.9042, 116.4074),
+                  initialZoom: _defaultZoom,
+                  markers: _circles,
+                  polylines: _polylines,
+                  controller: _mapController,
                 ),
                 const MapAttribution(),
               ],

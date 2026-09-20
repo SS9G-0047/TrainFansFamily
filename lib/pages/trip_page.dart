@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:warningapplication_1/widgets/railway_vector_layer.dart';
+import 'package:warningapplication_1/widgets/maplibre_map.dart';
 
 import '../models/trip_record.dart';
 import '../services/trip_service.dart';
@@ -17,7 +16,7 @@ class TripPage extends StatefulWidget {
 
 class _TripPageState extends State<TripPage> {
   final TripService _tripService = TripService.instance;
-  final MapController _mapController = MapController();
+  final MapLibreController _mapController = MapLibreController();
 
   /// 自动跟随当前位置。
   bool _autoFollow = true;
@@ -26,48 +25,18 @@ class _TripPageState extends State<TripPage> {
   DateTime? _lastCenteredTime;
 
   /// 当前路径线列表。
-  final List<Polyline> _polylines = [];
+  final List<MapPolyline> _polylines = [];
 
-  /// 当前标记圆点列表。
-  final List<CircleMarker> _circles = [];
+  /// 当前标记列表。
+  final List<MapMarker> _circles = [];
 
   /// 防止注记更新重入。
   bool _isUpdating = false;
-
-  /// 缓存的 MapOptions — 避免每次 build 创建新实例。
-  ///
-  /// FlutterMap.didUpdateWidget 检测到 MapOptions 变化（按引用比较）后
-  /// 会调用 MapControllerImpl.options setter，创建新的 _MapControllerState
-  /// 并触发 notifyListeners()。GPS 每秒更新一次时，这会导致 FlutterMap
-  /// 及所有子 Widget（含 VectorTileLayer / TileLayer）频繁全量 rebuild，
-  /// 干扰 tile loading 流程，新区域瓦片无法正确加载。
-  /// initialCenter 只在首次渲染时使用，后续 camera 位置由 MapController
-  /// 管理，不会受 initialCenter 影响。
-  late final MapOptions _mapOptions;
 
   @override
   void initState() {
     super.initState();
     _tripService.addListener(_refresh);
-
-    // 在 initState 中创建一次 MapOptions，后续 build 复用同一实例。
-    // initialCenter 使用默认北京坐标，实际位置由 _centerOnLatest() 设置。
-    _mapOptions = MapOptions(
-      initialCenter: wgs84ToGcj02(39.9042, 116.4074),
-      initialZoom: 15.0,
-      minZoom: 4.0,
-      maxZoom: 14.0,
-      interactionOptions: InteractionOptions(
-        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-      ),
-      onPositionChanged: (position, hasGesture) {
-        if (hasGesture && _autoFollow) {
-          // 只在 _autoFollow 从 true→false 时 setState，避免每次拖动都触发
-          // 全量 rebuild 干扰 tile loading。
-          setState(() => _autoFollow = false);
-        }
-      },
-    );
   }
 
   @override
@@ -101,7 +70,7 @@ class _TripPageState extends State<TripPage> {
     _lastCenteredTime = last.timestamp;
 
     final target = wgs84ToGcj02(last.latitude, last.longitude);
-    final zoom = _mapController.camera.zoom;
+    final zoom = _mapController.zoom;
     _mapController.move(target, zoom < 15 ? 15 : zoom);
   }
 
@@ -124,10 +93,10 @@ class _TripPageState extends State<TripPage> {
             .map((p) => LatLng(p.latitude, p.longitude))
             .toList();
         final gcjPoints = wgs84ListToGcj02(wgsPoints);
-        _polylines.add(Polyline(
+        _polylines.add(MapPolyline(
           points: gcjPoints,
           color: const Color(0xFF0000FF),
-          strokeWidth: 4,
+          width: 4,
         ));
       }
 
@@ -137,13 +106,10 @@ class _TripPageState extends State<TripPage> {
           validPoints.last.latitude,
           validPoints.last.longitude,
         );
-        _circles.add(CircleMarker(
+        _circles.add(MapMarker(
           point: current,
-          radius: 8,
           color: const Color(0xFFFF0000),
-          borderColor: Colors.white,
-          borderStrokeWidth: 2,
-          useRadiusInMeter: false,
+          size: 16,
         ));
       }
 
@@ -153,13 +119,10 @@ class _TripPageState extends State<TripPage> {
           validPoints.first.latitude,
           validPoints.first.longitude,
         );
-        _circles.add(CircleMarker(
+        _circles.add(MapMarker(
           point: start,
-          radius: 6,
           color: const Color(0xFF0000FF),
-          borderColor: Colors.white,
-          borderStrokeWidth: 2,
-          useRadiusInMeter: false,
+          size: 12,
         ));
       }
 
@@ -533,24 +496,17 @@ class _TripPageState extends State<TripPage> {
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: FlutterMap(
-                mapController: _mapController,
-                options: _mapOptions,
-                children: [
-                  TileLayer(
-                    urlTemplate: amapTileUrlTemplate,
-                    subdomains: amapSubdomains,
-                    maxZoom: 18,
-                    maxNativeZoom: 18,
-                    tileBuilder: (context, tile, tileImage) => ColorFiltered(
-                      colorFilter: const ColorFilter.matrix(amapGrayscaleMatrix),
-                      child: tile,
-                    ),
-                  ),
-                  RailwayVectorLayer(),
-                  PolylineLayer(polylines: _polylines),
-                  CircleLayer(circles: _circles),
-                ],
+              child: MapLibreMapWidget(
+                initialCenter: wgs84ToGcj02(39.9042, 116.4074),
+                initialZoom: 15.0,
+                markers: _circles,
+                polylines: _polylines,
+                controller: _mapController,
+                onPositionChanged: (hasGesture) {
+                  if (hasGesture && _autoFollow) {
+                    setState(() => _autoFollow = false);
+                  }
+                },
               ),
             ),
           ),

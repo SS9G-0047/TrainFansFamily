@@ -1,0 +1,358 @@
+{
+  "version": 8,
+  "name": "Red Theme",
+  "glyphs": "https://fonts.openmaptiles.org/{fontstack}/{range}.pbf",
+  "sources": {
+    "amap": {
+      "type": "raster",
+      "tiles": [
+        "https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
+        "https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
+        "https://webrd03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
+        "https://webrd04.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}"
+      ],
+      "tileSize": 256,
+      "maxzoom": 18
+    },
+    "railway": {
+      "type": "vector",
+      "tiles": [
+        "https://flutter-map.xhcminecraft.top/data/railway/{z}/{x}/{y}.pbf"
+      ],
+      "minzoom": 7,
+      "maxzoom": 14
+    }
+  },
+  "layers": [
+    {
+      "id": "background",
+      "type": "background",
+      "paint": {
+        "background-color": "#1a0000"
+      }
+    },
+    {
+      "id": "amap-raster",
+      "type": "raster",
+      "source": "amap",
+      "paint": {
+        "raster-opacity": 0.5,
+        "raster-saturation": -1
+      }
+    },
+    {
+      "id": "rail-service",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": ["has", "service"],
+      "paint": {
+        "line-color": "#cc0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.3, 8, 0.5, 10, 0.8, 12, 1.0, 15, 1.2
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-branch-tunnel",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": [
+        "all",
+        ["==", "railway", "rail"],
+        ["==", "usage", "branch"],
+        ["!", ["has", "service"]],
+        ["in", "tunnel", "yes", "subway"]
+      ],
+      "paint": {
+        "line-color": "#cc0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.6, 8, 1.2, 10, 1.6, 12, 2.0, 15, 2.5
+        ],
+        "line-dasharray": [
+          "interpolate", ["linear"], ["zoom"],
+          8, [4, 2], 12, [8, 4], 15, [10, 5]
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-branch",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": [
+        "all",
+        ["==", "railway", "rail"],
+        ["==", "usage", "branch"],
+        ["!", ["has", "service"]],
+        ["!in", "tunnel", "yes", "subway"]
+      ],
+      "paint": {
+        "line-color": "#cc0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.8, 8, 1.5, 10, 2.0, 12, 2.4, 15, 3.0
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-main-tunnel",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": [
+        "all",
+        ["==", "railway", "rail"],
+        ["!=", "usage", "branch"],
+        ["!=", "highspeed", "yes"],
+        ["!", ["has", "service"]],
+        ["in", "tunnel", "yes", "subway"]
+      ],
+      "paint": {
+        "line-color": "#ff0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.8, 8, 1.5, 10, 2.0, 12, 2.6, 15, 3.5
+        ],
+        "line-dasharray": [
+          "interpolate", ["linear"], ["zoom"],
+          8, [4, 2], 12, [8, 4], 15, [10, 5]
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-main",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": [
+        "all",
+        ["==", "railway", "rail"],
+        ["!=", "usage", "branch"],
+        ["!=", "highspeed", "yes"],
+        ["!", ["has", "service"]],
+        ["!in", "tunnel", "yes", "subway"]
+      ],
+      "paint": {
+        "line-color": "#ff0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 1.0, 8, 1.8, 10, 2.5, 12, 3.0, 15, 4.0
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-highspeed-tunnel",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": [
+        "all",
+        ["==", "railway", "rail"],
+        ["==", "highspeed", "yes"],
+        ["!", ["has", "service"]],
+        ["in", "tunnel", "yes", "subway"]
+      ],
+      "paint": {
+        "line-color": "#ff3333",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 1.0, 8, 1.8, 10, 2.5, 12, 2.8, 15, 4.0
+        ],
+        "line-dasharray": [
+          "interpolate", ["linear"], ["zoom"],
+          8, [4, 2], 12, [8, 4], 15, [10, 5]
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-highspeed",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": [
+        "all",
+        ["==", "railway", "rail"],
+        ["==", "highspeed", "yes"],
+        ["!", ["has", "service"]],
+        ["!in", "tunnel", "yes", "subway"]
+      ],
+      "paint": {
+        "line-color": "#ff3333",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 1.2, 8, 2.0, 10, 2.8, 12, 3.2, 15, 4.5
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "subway-line",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": ["==", "railway", "subway"],
+      "paint": {
+        "line-color": "#cc0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 1.0, 8, 1.8, 10, 2.2, 12, 2.4, 15, 3.0
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "lightrail-line",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": ["==", "railway", "light_rail"],
+      "paint": {
+        "line-color": "#cc0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.8, 8, 1.6, 10, 2.0, 12, 2.2, 15, 2.8
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "tram-line",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": ["==", "railway", "tram"],
+      "paint": {
+        "line-color": "#cc0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.8, 8, 1.4, 10, 1.8, 12, 2.0, 15, 2.4
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-other",
+      "type": "line",
+      "source": "railway",
+      "source-layer": "railway",
+      "filter": [
+        "all",
+        ["has", "railway"],
+        ["!in", "railway", "rail", "subway", "light_rail", "tram"],
+        ["!", ["has", "service"]]
+      ],
+      "paint": {
+        "line-color": "#cc0000",
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          5, 0.5, 8, 1.0, 10, 1.5, 12, 2.0, 15, 2.5
+        ],
+        "line-join": "round",
+        "line-cap": "round"
+      }
+    },
+    {
+      "id": "rail-line-label",
+      "type": "symbol",
+      "source": "railway",
+      "source-layer": "railway",
+      "minzoom": 11,
+      "layout": {
+        "symbol-placement": "line",
+        "symbol-spacing": 500,
+        "text-field": [
+          "coalesce",
+          ["get", "name:zh"],
+          ["get", "name"],
+          ["get", "ref"]
+        ],
+        "text-size": [
+          "interpolate", ["linear"], ["zoom"],
+          11, 10, 13, 12, 16, 14
+        ],
+        "text-keep-upright": true,
+        "text-max-angle": 30,
+        "text-rotation-alignment": "map",
+        "text-pitch-alignment": "map"
+      },
+      "paint": {
+        "text-color": "#ff6666",
+        "text-halo-color": "#1a0000",
+        "text-halo-width": 1.5,
+        "text-halo-blur": 0.2
+      },
+      "filter": [
+        "all",
+        ["==", "railway", "rail"],
+        ["!", ["has", "service"]],
+        ["any",
+          ["==", "highspeed", "yes"],
+          ["!=", "usage", "branch"]
+        ],
+        ["any",
+          ["has", "name:zh"],
+          ["has", "name"],
+          ["has", "ref"]
+        ]
+      ]
+    },
+    {
+      "id": "rail-station-label",
+      "type": "symbol",
+      "source": "railway",
+      "source-layer": "railway",
+      "minzoom": 12,
+      "layout": {
+        "text-field": [
+          "coalesce",
+          ["get", "name:zh"],
+          ["get", "name"],
+          ["get", "ref"]
+        ],
+        "text-size": [
+          "interpolate", ["linear"], ["zoom"],
+          12, 10, 14, 12, 17, 14
+        ],
+        "text-offset": [0, 1.1],
+        "text-anchor": "top",
+        "text-allow-overlap": false,
+        "text-ignore-placement": false
+      },
+      "paint": {
+        "text-color": "#ff6666",
+        "text-halo-color": "#1a0000",
+        "text-halo-width": 2,
+        "text-halo-blur": 0.2
+      },
+      "filter": [
+        "all",
+        ["in", "railway", "station", "halt", "stop", "tram_stop"],
+        ["any",
+          ["has", "name:zh"],
+          ["has", "name"],
+          ["has", "ref"]
+        ]
+      ]
+    }
+  ]
+}

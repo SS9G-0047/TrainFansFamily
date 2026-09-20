@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:warningapplication_1/pages/train_search_page.dart';
 import '../models/function_item.dart';
@@ -66,18 +67,25 @@ class _MyHomePageState extends State<MyHomePage> {
         targetPage: const TripPage(),
       ),
       AppFunctionItem(
-        icon: Icons.settings,
-        name: "系统设置",
-        themeColor: Colors.grey.shade700,
-        targetPage: const SettingPage(),
-      ),
-      AppFunctionItem(
         icon: Icons.train,
         name: "列车数据查询",
         themeColor: const Color.fromARGB(255, 109, 22, 6),
         targetPage: const TrainSearchPage(),
       ),
-    ];
+      AppFunctionItem(
+        icon: Icons.settings,
+        name: "系统设置",
+        themeColor: Colors.grey.shade700,
+        targetPage: const SettingPage(),
+      ),
+    ].where((item) {
+      // Windows 剔除预警器连接
+      if(defaultTargetPlatform == TargetPlatform.windows){
+        return item.name != "预警器连接" && item.name != "行程" && item.name != "系统设置" && item.name != "历史查阅";
+      }
+      return true;
+    }).toList();
+
     // 确保监听器已注册后再检查（处理异步加载已完成的情况）
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkInterruptedTrip();
@@ -153,20 +161,22 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Scaffold(
-      // appBar: AppBar(
-      //   backgroundColor: scheme.inversePrimary,
-      //   title: Text(widget.title),
-      //   centerTitle: true,
-      // ),
-      body: Padding(
-        padding: const EdgeInsets.all(12),
+Widget build(BuildContext context) {
+  final scheme = Theme.of(context).colorScheme;
+  return Scaffold(
+    // appBar: AppBar(
+    //   backgroundColor: scheme.inversePrimary,
+    //   title: Text(widget.title),
+    //   centerTitle: true,
+    // ),
+    body: SafeArea( // 新增：自动避开手机状态栏
+      child: Padding(
+        // 水平12，顶部12，底部12；想加大顶部就改成 top:24
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (_settings.homeWarningEnabled) ...[
+            if (_settings.homeWarningEnabled && defaultTargetPlatform != TargetPlatform.windows) ...[
               buildWarningPanel(context, _bleService.warningTextList),
               const SizedBox(height: 20),
             ],
@@ -211,6 +221,7 @@ class _MyHomePageState extends State<MyHomePage> {
           ],
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 }

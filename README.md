@@ -26,6 +26,13 @@
 
 硬件研发中，后续补全。
 
+
+## 鸣谢
+
+1. Rail.re 提供动车组交路的数据以供查询
+2. OpenCRHTracker 提供动车组交路的数据以供查询
+3.
+
 ## About other languages / 关于其它语言支持
 
 We'll finish supporting English at around Jan 2027. This APP don't support any language except Chinese right now. So the Readme won't have English version till Jan 2026. Any issue about supporting English or other languages will be seen as damage activity.

@@ -2,9 +2,8 @@ import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:warningapplication_1/widgets/railway_vector_layer.dart';
+import 'package:warningapplication_1/widgets/maplibre_map.dart';
 
 import '../models/trip_record.dart';
 import '../utils/map_config.dart';
@@ -19,7 +18,7 @@ class TripDetailPage extends StatefulWidget {
 }
 
 class _TripDetailPageState extends State<TripDetailPage> {
-  final MapController _mapController = MapController();
+  final MapLibreController _mapController = MapLibreController();
 
   late final List<TripPoint> _validPoints;
   late final List<LatLng> _path;
@@ -30,27 +29,14 @@ class _TripDetailPageState extends State<TripDetailPage> {
   bool _isPlaying = false;
   bool _showAllPath = true;
 
-  /// 当前路径线注记列表。
-  final List<Polyline> _polylines = [];
+  final List<MapPolyline> _polylines = [];
 
-  /// 当前标记圆点列表。
-  final List<CircleMarker> _circles = [];
-
-  /// 缓存的 MapOptions — 避免每次 build 创建新实例。
-  ///
-  /// FlutterMap.didUpdateWidget 检测到 MapOptions 变化（按引用比较）后
-  /// 会调用 MapControllerImpl.options setter，创建新的 _MapControllerState
-  /// 并触发 notifyListeners()，导致 FlutterMap 及所有子 Widget（含
-  /// VectorTileLayer / TileLayer）全量 rebuild，干扰 tile loading 流程。
-  /// initialCenter 只在首次渲染时使用，后续 camera 位置由 MapController
-  /// 管理，不会受 initialCenter 影响。
-  late final MapOptions _mapOptions;
+  final List<MapMarker> _circles = [];
 
   @override
   void initState() {
     super.initState();
     _validPoints = widget.record.validPoints;
-    // 将 WGS-84 坐标转换为 GCJ-02（高德瓦片坐标系）
     _path = wgs84ListToGcj02(
       _validPoints.map((p) => LatLng(p.latitude, p.longitude)).toList(),
     );
@@ -58,19 +44,6 @@ class _TripDetailPageState extends State<TripDetailPage> {
     if (_path.isNotEmpty) _animatedPath.add(_path.first);
     _rebuildAnnotations();
 
-    // 在 initState 中创建一次 MapOptions，后续 build 复用同一实例。
-    // initialCenter 使用默认北京坐标，实际位置由 post-frame callback 设置。
-    _mapOptions = MapOptions(
-      initialCenter: _defaultCenter,
-      initialZoom: 14.0,
-      minZoom: 4.0,
-      maxZoom: 14.0,
-      interactionOptions: InteractionOptions(
-        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-      ),
-    );
-
-    // 地图就绪后将中心移动到当前路径点。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _path.isEmpty) return;
       final point = _showAllPath ? _path.last : _path[_currentIndex];
@@ -145,7 +118,7 @@ class _TripDetailPageState extends State<TripDetailPage> {
   /// 将相机移动到路径中指定索引的点。
   void _moveToPath(int index) {
     if (index < 0 || index >= _path.length) return;
-    _mapController.move(_path[index], _mapController.camera.zoom);
+    _mapController.move(_path[index], _mapController.zoom);
   }
 
   /// 根据 _showAllPath 和 _currentIndex 重建注记列表（不触发重建）。
@@ -162,10 +135,10 @@ class _TripDetailPageState extends State<TripDetailPage> {
     }
     if (linePoints.length > 1) {
       _polylines.add(
-        Polyline(
+        MapPolyline(
           points: linePoints,
           color: const Color(0xFF0000FF),
-          strokeWidth: 3,
+          width: 3,
         ),
       );
     }
@@ -183,13 +156,10 @@ class _TripDetailPageState extends State<TripDetailPage> {
     // 添加当前点标记（红色）
     if (currentPoint != null) {
       _circles.add(
-        CircleMarker(
+        MapMarker(
           point: currentPoint,
-          radius: 8,
           color: const Color(0xFFFF0000),
-          borderColor: Colors.white,
-          borderStrokeWidth: 2,
-          useRadiusInMeter: false,
+          size: 16,
         ),
       );
     }
@@ -197,13 +167,10 @@ class _TripDetailPageState extends State<TripDetailPage> {
     // 添加起点标记（蓝色）
     if (_path.isNotEmpty) {
       _circles.add(
-        CircleMarker(
+        MapMarker(
           point: _path.first,
-          radius: 6,
-          color: const Color(0xFF0000FF),
-          borderColor: Colors.white,
-          borderStrokeWidth: 2,
-          useRadiusInMeter: false,
+          color: Colors.red,
+          size: 12,
         ),
       );
     }
@@ -211,13 +178,10 @@ class _TripDetailPageState extends State<TripDetailPage> {
     // 添加终点标记（橙色）
     if (_path.length > 1) {
       _circles.add(
-        CircleMarker(
+        MapMarker(
           point: _path.last,
-          radius: 6,
-          color: const Color(0xFFFF9800),
-          borderColor: Colors.white,
-          borderStrokeWidth: 2,
-          useRadiusInMeter: false,
+          color: Colors.red,
+          size: 12,
         ),
       );
     }
@@ -302,24 +266,12 @@ class _TripDetailPageState extends State<TripDetailPage> {
             height: 300,
             child: Stack(
               children: [
-                FlutterMap(
-                  mapController: _mapController,
-                  options: _mapOptions,
-                  children: [
-                    TileLayer(
-                      urlTemplate: amapTileUrlTemplate,
-                      subdomains: amapSubdomains,
-                      maxZoom: 18,
-                      maxNativeZoom: 18,
-                      tileBuilder: (context, tile, tileImage) => ColorFiltered(
-                        colorFilter: const ColorFilter.matrix(amapGrayscaleMatrix),
-                        child: tile,
-                      ),
-                    ),
-                    RailwayVectorLayer(),
-                    CircleLayer(circles: _circles),
-                    PolylineLayer(polylines: _polylines),
-                  ],
+                MapLibreMapWidget(
+                  initialCenter: _defaultCenter,
+                  initialZoom: 14,
+                  controller: _mapController,
+                  markers: _circles,
+                  polylines: _polylines,
                 ),
                 const MapAttribution(),
               ],

@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:warningapplication_1/widgets/railway_vector_layer.dart';
+import 'package:warningapplication_1/utils/map_config.dart';
+import 'package:warningapplication_1/widgets/maplibre_map.dart';
 
 import '../models/camera_position.dart' as cam_model;
 import '../services/camera_position_service.dart';
@@ -10,7 +10,6 @@ import '../services/native_image_service.dart';
 import '../services/native_location_service.dart';
 import 'native_image_picker_page.dart';
 import '../utils/cross_file_image.dart';
-import '../utils/map_config.dart';
 import 'package:coordtransform/coordtransform.dart';
 
 class CameraPositionPage extends StatefulWidget {
@@ -1229,20 +1228,10 @@ class SimpleMapPickPage extends StatefulWidget {
 }
 
 class _SimpleMapPickPageState extends State<SimpleMapPickPage> {
-  final MapController _mapController = MapController();
+  final MapLibreController _mapController = MapLibreController();
 
   /// 选中的点（WGS-84），用于存储和返回。
   late LatLng _selectedPoint;
-
-  /// 缓存的 MapOptions — 避免每次 build 创建新实例。
-  ///
-  /// FlutterMap.didUpdateWidget 检测到 MapOptions 变化（按引用比较）后
-  /// 会调用 MapControllerImpl.options setter，创建新的 _MapControllerState
-  /// 并触发 notifyListeners()，导致 FlutterMap 及所有子 Widget（含
-  /// VectorTileLayer / TileLayer）全量 rebuild，干扰 tile loading 流程。
-  /// initialCenter 只在首次渲染时使用，后续 camera 位置由 MapController
-  /// 管理，不会受 initialCenter 影响。
-  late final MapOptions _mapOptions;
 
   @override
   void initState() {
@@ -1252,53 +1241,22 @@ class _SimpleMapPickPageState extends State<SimpleMapPickPage> {
       widget.initialLongitude,
     );
 
-    // 在 initState 中创建一次 MapOptions，后续 build 复用同一实例。
-    // initialCenter 使用默认北京坐标，实际位置由 post-frame callback 设置。
-    _mapOptions = MapOptions(
-      initialCenter: wgs84ToGcj02(39.9042, 116.4074),
-      initialZoom: 15,
-      minZoom: 4.0,
-      maxZoom: 18.0,
-      interactionOptions: InteractionOptions(
-        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-      ),
-      onTap: (tapPosition, point) {
-        // point 是 GCJ-02 坐标，转回 WGS-84 存储
-        final wgsPoint = gcj02ToWgs84(
-          point.latitude,
-          point.longitude,
-        );
-        setState(() => _selectedPoint = wgsPoint);
-      },
-    );
-
     // 地图就绪后将中心移动到初始选点。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final gcj = wgs84ToGcj02(
-        _selectedPoint.latitude,
-        _selectedPoint.longitude,
+      _mapController.move(
+        wgs84ToGcj02(_selectedPoint.latitude, _selectedPoint.longitude),
+        15,
       );
-      _mapController.move(gcj, 15);
     });
   }
 
   /// 构建选中点的标记列表（WGS-84 → GCJ-02）。
-  List<Marker> get _markers => [
-        Marker(
+  List<MapMarker> get _markers => [
+        MapMarker(
           point: wgs84ToGcj02(_selectedPoint.latitude, _selectedPoint.longitude),
-          width: 32,
-          height: 32,
-          child: Container(
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: const Color(0xFF9C27B0),
-              border: Border.all(color: Colors.white, width: 2),
-              boxShadow: const [
-                BoxShadow(color: Colors.black26, blurRadius: 3),
-              ],
-            ),
-          ),
+          color: Colors.red,
+          size: 32,
         ),
       ];
 
@@ -1312,23 +1270,17 @@ class _SimpleMapPickPageState extends State<SimpleMapPickPage> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: FlutterMap(
-                    mapController: _mapController,
-                    options: _mapOptions,
-                    children: [
-                      TileLayer(
-                        urlTemplate: amapTileUrlTemplate,
-                        subdomains: amapSubdomains,
-                        maxZoom: 18,
-                        maxNativeZoom: 18,
-                        tileBuilder: (context, tile, tileImage) => ColorFiltered(
-                          colorFilter: const ColorFilter.matrix(amapGrayscaleMatrix),
-                          child: tile,
-                        ),
-                      ),
-                      RailwayVectorLayer(),
-                      MarkerLayer(markers: _markers),
-                    ],
+                  child: MapLibreMapWidget(
+                    initialCenter: wgs84ToGcj02(39.9042, 116.4074),
+                    initialZoom: 15,
+                    markers: _markers,
+                    controller: _mapController,
+                    onMapTap: (point) {
+                      setState(() => _selectedPoint = gcj02ToWgs84(
+                            point.latitude,
+                            point.longitude,
+                          ));
+                    },
                   ),
                 ),
                 Align(
@@ -1372,7 +1324,7 @@ class _SimpleMapPickPageState extends State<SimpleMapPickPage> {
                         location.latitude,
                         location.longitude,
                       );
-                      final currentZoom = _mapController.camera.zoom;
+                      final currentZoom = _mapController.zoom;
                       _mapController.move(
                         gcj,
                         currentZoom < 15 ? 15 : currentZoom,
@@ -1419,34 +1371,12 @@ class CameraPositionDetailPage extends StatefulWidget {
 
 class _CameraPositionDetailPageState extends State<CameraPositionDetailPage> {
   final CameraPositionService _service = CameraPositionService.instance;
-  final MapController _mapController = MapController();
-
-  /// 缓存的 MapOptions — 避免每次 build 创建新实例。
-  ///
-  /// FlutterMap.didUpdateWidget 检测到 MapOptions 变化（按引用比较）后
-  /// 会调用 MapControllerImpl.options setter，创建新的 _MapControllerState
-  /// 并触发 notifyListeners()，导致 FlutterMap 及所有子 Widget（含
-  /// VectorTileLayer / TileLayer）全量 rebuild，干扰 tile loading 流程。
-  /// initialCenter 只在首次渲染时使用，后续 camera 位置由 MapController
-  /// 管理，不会受 initialCenter 影响。
-  late final MapOptions _mapOptions;
+  final MapLibreController _mapController = MapLibreController();
 
   @override
   void initState() {
     super.initState();
     _service.addListener(_refresh);
-
-    // 在 initState 中创建一次 MapOptions，后续 build 复用同一实例。
-    // initialCenter 使用默认北京坐标，实际位置由 post-frame callback 设置。
-    _mapOptions = MapOptions(
-      initialCenter: wgs84ToGcj02(39.9042, 116.4074),
-      initialZoom: 15,
-      minZoom: 4.0,
-      maxZoom: 18.0,
-      interactionOptions: InteractionOptions(
-        flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
-      ),
-    );
 
     // 地图就绪后将中心移动到机位坐标。
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1520,40 +1450,12 @@ class _CameraPositionDetailPageState extends State<CameraPositionDetailPage> {
       height: 220,
       child: Stack(
         children: [
-          FlutterMap(
-            mapController: _mapController,
-            options: _mapOptions,
-            children: [
-              TileLayer(
-                urlTemplate: amapTileUrlTemplate,
-                subdomains: amapSubdomains,
-                maxZoom: 18,
-                maxNativeZoom: 18,
-                tileBuilder: (context, tile, tileImage) => ColorFiltered(
-                  colorFilter: const ColorFilter.matrix(amapGrayscaleMatrix),
-                  child: tile,
-                ),
-              ),
-              RailwayVectorLayer(),
-              MarkerLayer(
-                markers: [
-                  Marker(
-                    point: gcjPoint,
-                    width: 32,
-                    height: 32,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: const Color(0xFF9C27B0),
-                        border: Border.all(color: Colors.white, width: 2),
-                        boxShadow: const [
-                          BoxShadow(color: Colors.black26, blurRadius: 3),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+          MapLibreMapWidget(
+            initialCenter: wgs84ToGcj02(39.9042, 116.4074),
+            initialZoom: 15,
+            controller: _mapController,
+            markers: [
+              MapMarker(point: gcjPoint, color: Colors.red, size: 32),
             ],
           ),
           const MapAttribution(),
