@@ -1272,7 +1272,7 @@ class _SimpleMapPickPageState extends State<SimpleMapPickPage> {
                 Positioned.fill(
                   child: MapLibreMapWidget(
                     initialCenter: wgs84ToGcj02(39.9042, 116.4074),
-                    initialZoom: 15,
+                    initialZoom: 17,
                     markers: _markers,
                     controller: _mapController,
                     onMapTap: (point) {
@@ -1452,7 +1452,7 @@ class _CameraPositionDetailPageState extends State<CameraPositionDetailPage> {
         children: [
           MapLibreMapWidget(
             initialCenter: wgs84ToGcj02(39.9042, 116.4074),
-            initialZoom: 15,
+            initialZoom: 17,
             controller: _mapController,
             markers: [
               MapMarker(point: gcjPoint, color: Colors.red, size: 32),

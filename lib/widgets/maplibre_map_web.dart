@@ -68,20 +68,31 @@ class _MapLibreMapWebState extends State<MapLibreMapWidget> {
           setTimeout(function() { window.__retryInitMap && window.__retryInitMap('$divId', '$_viewType'); }, 50);
           return;
         }
-        var style = JSON.parse(window['__mapStyle_$_viewType']);
-        var map = new maplibregl.Map({
-          container: container,
-          style: style,
-          center: [${widget.initialCenter.longitude}, ${widget.initialCenter.latitude}],
-          zoom: ${widget.initialZoom},
-          minZoom: 4,
-          maxZoom: 19,
-          dragRotate: false,
-          touchPitch: false,
-          attributionControl: false
-        });
-        window.__mapControllers = window.__mapControllers || {};
-        window.__mapControllers['$_viewType'] = window.createMapController(map, '$_viewType');
+        try {
+          var style = JSON.parse(window['__mapStyle_$_viewType']);
+          var map = new maplibregl.Map({
+            container: container,
+            style: style,
+            center: [${widget.initialCenter.longitude}, ${widget.initialCenter.latitude}],
+            zoom: ${widget.initialZoom},
+            minZoom: $maplibreMinZoom,
+            maxZoom: $maplibreMaxZoom,
+            dragRotate: false,
+            touchPitch: false,
+            attributionControl: false
+          });
+          map.on('load', function() {
+            setTimeout(function() { map.resize(); }, 50);
+            setTimeout(function() { map.resize(); }, 200);
+          });
+          map.on('error', function(e) {
+            console.error('MapLibre Web error: ' + (e && e.error ? e.error.message : 'unknown'));
+          });
+          window.__mapControllers = window.__mapControllers || {};
+          window.__mapControllers['$_viewType'] = window.createMapController(map, '$_viewType');
+        } catch (e) {
+          console.error('MapLibre Web init error: ' + e.message);
+        }
       })();
     """;
     js.context.callMethod('eval', [code]);
@@ -104,6 +115,7 @@ class _MapLibreMapWebState extends State<MapLibreMapWidget> {
 
     switch (type) {
       case 'ready':
+        if (mounted) setState(() => _ready = true);
         _updateAll();
         break;
       case 'tap':
@@ -166,7 +178,7 @@ class _MapLibreMapWebState extends State<MapLibreMapWidget> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_ready) return const ColoredBox(color: Color(0xFF1a0000));
+    if (!_ready) return const ColoredBox(color: Color(0xFFe5e5e5));
     return HtmlElementView(viewType: _viewType!);
   }
 

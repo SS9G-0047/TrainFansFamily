@@ -12,6 +12,12 @@ Future<void> main() async {
   FlutterError.onError = (FlutterErrorDetails details) {
     final exceptionStr = details.exception.toString();
     final stackStr = details.stack?.toString() ?? '';
+
+    if (exceptionStr.contains('Attempted to send a key down event when no keys are in keysPressed') ||
+        exceptionStr.contains('Unable to parse JSON message: The document is empty')) {
+      return;
+    }
+
     // 瓦片取消加载（flutter_map 缩放/平移时的正常行为）
     if (exceptionStr.contains('Cancelled') ||
         exceptionStr.contains('CancellationException')) {

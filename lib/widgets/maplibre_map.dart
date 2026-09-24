@@ -6,6 +6,10 @@ import 'maplibre_map_mobile.dart'
   as platform;
 
 const String maplibreStyleAssetPath = 'lib/assets/maplibre/map_style.json';
+const String maplibreVersion = '3.6.2';
+const String maplibreCdnBase = 'https://unpkg.com/maplibre-gl@$maplibreVersion/dist';
+const double maplibreMinZoom = 4;
+const double maplibreMaxZoom = 19;
 
 const String kMapControllerJs = r'''
 window.createMapController = function(map, viewType) {
@@ -14,6 +18,24 @@ window.createMapController = function(map, viewType) {
   var hasGesture = false;
   var ready = false;
   var pendingOps = [];
+  var tileCache = window.__mapTileCache = window.__mapTileCache || {};
+  // No fallback to neighboring zoom levels for missing tiles; keep blank if requested tile is unavailable.
+
+  function tileKey(tile) {
+    if (!tile || !tile.tileID) return null;
+    var id = tile.tileID;
+    return tile.source + ':' + id.z + ':' + id.x + ':' + id.y;
+  }
+
+  map.on('tileload', function(e) {
+    var key = tileKey(e.tile);
+    if (key) tileCache[key] = Date.now();
+  });
+
+  map.on('tileerror', function(e) {
+    var key = tileKey(e.tile);
+    if (key) delete tileCache[key];
+  });
 
   function onReady(cb) {
     if (ready) cb();

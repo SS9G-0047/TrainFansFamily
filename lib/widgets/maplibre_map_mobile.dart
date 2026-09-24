@@ -1,9 +1,12 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
-import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_all/webview_all.dart';
 
 import 'maplibre_map.dart';
 
@@ -12,7 +15,14 @@ State<MapLibreMapWidget> createMapLibreState() => _MapLibreMapMobileState();
 class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
   WebViewController? _webController;
   bool _mapReady = false;
+  String? _initError;
   late final _MobileControllerImpl _ctrlImpl;
+
+  // Android only: CORS tile proxy state
+  final Map<int, _TileRequest> _tileRequests = {};
+  int _tileReqId = 0;
+
+  bool get _isAndroid => defaultTargetPlatform == TargetPlatform.android;
 
   @override
   void initState() {
@@ -25,48 +35,63 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
   }
 
   Future<void> _init() async {
-    final styleJson = await rootBundle.loadString(maplibreStyleAssetPath);
-    final viewType = 'maplibre-${identityHashCode(this)}';
+    try {
+      final styleJson = await rootBundle.loadString(maplibreStyleAssetPath);
+      final viewId = 'maplibre-${identityHashCode(this)}';
 
-    final html = _buildHtml(
-      styleJson,
-      widget.initialCenter.latitude,
-      widget.initialCenter.longitude,
-      widget.initialZoom,
-      viewType,
-    );
-
-    final controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..addJavaScriptChannel(
+      final controller = WebViewController();
+      await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+      await controller.addJavaScriptChannel(
         'flutterMapEvent',
-        onMessageReceived: (JavaScriptMessage msg) {
-          _handleEvent(msg.message);
-        },
+        onMessageReceived: (m) => _handleEvent(m.message),
       );
 
-    await controller.loadHtmlString(html);
+      // Only register tile proxy channel on Android
+      if (_isAndroid) {
+        await controller.addJavaScriptChannel(
+          'flutterTileProxy',
+          onMessageReceived: (m) => _handleTileRequest(m.message),
+        );
+      }
 
-    _webController = controller;
-    _ctrlImpl._webView = controller;
-    widget.controller?.attach(_ctrlImpl);
+      await controller.setOnConsoleMessage((msg) {
+        debugPrint('[MapLibre] ${msg.message}');
+      });
 
-    if (mounted) setState(() {});
+      await controller.loadHtmlString(
+        _buildHtml(styleJson, viewId),
+        baseUrl: 'https://maplibre.local/',
+      );
+
+      _webController = controller;
+      _ctrlImpl._webView = controller;
+      widget.controller?.attach(_ctrlImpl);
+
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('MapLibre init failed: $e');
+      if (mounted) setState(() => _initError = e.toString());
+    }
   }
 
-  String _buildHtml(String styleJson, double lat, double lng, double zoom, String viewType) {
-    final styleEncoded = jsonEncode(styleJson);
+  String _buildHtml(String styleJson, String viewId) {
+    final styleLiteral = jsonEncode(styleJson);
+    final useProxy = _isAndroid ? 'true' : 'false';
+    final centerLng = widget.initialCenter.longitude;
+    final centerLat = widget.initialCenter.latitude;
+    final initZoom = widget.initialZoom;
+
     return '''
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link href="$maplibreCdnBase/maplibre-gl.css" rel="stylesheet">
   <style>
-    html, body { margin: 0; padding: 0; overflow: hidden; background: #1a0000; height: 100%; }
-    #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #f5f5f5; }
+    #map { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
     .maplibregl-ctrl-attribution { display: none !important; }
   </style>
 </head>
@@ -75,21 +100,183 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
   <script>
     $kMapControllerJs
 
-    window.__mapStyle = JSON.parse($styleEncoded);
+    var _useProxy = $useProxy;
 
-    var map = new maplibregl.Map({
-      container: 'map',
-      style: window.__mapStyle,
-      center: [$lng, $lat],
-      zoom: $zoom,
-      minZoom: 4,
-      maxZoom: 19,
-      dragRotate: false,
-      touchPitch: false,
-      attributionControl: false
-    });
+    function _initMap() {
+      if (typeof maplibregl === 'undefined') {
+        console.error('maplibre-gl not available');
+        return;
+      }
+      try {
+        console.log('init map, useProxy=' + _useProxy);
 
-    window.__mapCtrl = window.createMapController(map, '$viewType');
+        var style = JSON.parse($styleLiteral);
+
+        // --- Android: replace railway tiles with tileproxy:// to bypass CORS ---
+        if (_useProxy && style.sources && style.sources.railway) {
+          if (window.flutterTileProxy && typeof maplibregl.addProtocol === 'function') {
+            _setupTileProxy();
+            var tiles = style.sources.railway.tiles;
+            style.sources.railway.tiles = tiles.map(function(u) {
+              return 'tileproxy://' + u.substring(8);
+            });
+            console.log('railway tiles using tileproxy');
+          } else {
+            console.warn('flutterTileProxy or addProtocol not available, railway tiles may fail CORS');
+          }
+        }
+
+        var mapOpts = {
+          container: 'map',
+          style: style,
+          center: [$centerLng, $centerLat],
+          zoom: $initZoom,
+          minZoom: $maplibreMinZoom,
+          maxZoom: $maplibreMaxZoom,
+          dragRotate: false,
+          touchPitch: false,
+          attributionControl: false,
+          antialias: false
+        };
+
+        var map = new maplibregl.Map(mapOpts);
+
+        map.on('load', function() {
+          console.log('map loaded');
+          _forceResize(map);
+        });
+
+        map.on('styledata', function() {
+          console.log('style data loaded');
+          _forceResize(map);
+        });
+
+        map.on('error', function(e) {
+          var msg = '';
+          if (e && e.error) {
+            msg = e.error.message || String(e.error);
+          } else {
+            msg = e ? (e.message || 'unknown') : 'unknown';
+          }
+          if (e && e.sourceId) msg += ' [source=' + e.sourceId + ']';
+          console.error('map error: ' + msg);
+        });
+
+        map.on('tileerror', function(e) {
+          var src = e && e.sourceId ? e.sourceId : '?';
+          var url = e && e.tile ? (e.tile.url || '') : '';
+          console.warn('tile error [' + src + ']: ' + url);
+        });
+
+        // Resize handling
+        var resizeTimer = null;
+        window.addEventListener('resize', function() {
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(function() { map.resize(); }, 100);
+        });
+        window.__mapResize = function() { map.resize(); };
+
+        window.__mapCtrl = window.createMapController(map, '$viewId');
+      } catch (e) {
+        console.error('map init error: ' + e.message + '\\n' + e.stack);
+      }
+    }
+
+    function _forceResize(map) {
+      setTimeout(function() { map.resize(); }, 30);
+      setTimeout(function() { map.resize(); }, 100);
+      setTimeout(function() { map.resize(); }, 300);
+      setTimeout(function() { map.resize(); }, 800);
+      setTimeout(function() { map.resize(); }, 1500);
+    }
+
+    // --- Android tile proxy (Promise style per MapLibre v3 API) ---
+    function _setupTileProxy() {
+      var _pending = {};
+      var _seq = 0;
+
+      window.flutterTileProxyResponse = function(reqId, b64) {
+        var req = _pending[reqId];
+        if (!req) return;
+        delete _pending[reqId];
+        try {
+          var bin = atob(b64);
+          var len = bin.length;
+          if (len === 0) {
+            req.resolve({ data: new ArrayBuffer(0) });
+            return;
+          }
+          var u8 = new Uint8Array(len);
+          for (var i = 0; i < len; i++) u8[i] = bin.charCodeAt(i);
+          req.resolve({ data: u8.buffer });
+        } catch (e) {
+          console.error('tile decode error: ' + e.message);
+          req.reject(e);
+        }
+      };
+
+      window.flutterTileProxyError = function(reqId, msg) {
+        var req = _pending[reqId];
+        if (!req) return;
+        delete _pending[reqId];
+        req.reject(new Error(msg || 'tile error'));
+      };
+
+      maplibregl.addProtocol('tileproxy', function(params, abortController) {
+        return new Promise(function(resolve, reject) {
+          var id = ++_seq;
+          _pending[id] = { resolve: resolve, reject: reject };
+          var url = 'https://' + params.url.substring(12);
+          try {
+            window.flutterTileProxy.postMessage(
+              JSON.stringify({ reqId: id, url: url })
+            );
+          } catch (e) {
+            delete _pending[id];
+            reject(e);
+          }
+          if (abortController && abortController.signal) {
+            abortController.signal.addEventListener('abort', function() {
+              delete _pending[id];
+              reject(new Error('aborted'));
+            });
+          }
+        });
+      });
+      console.log('tileproxy protocol registered (promise mode)');
+    }
+
+    // --- Load maplibre-gl.js with CDN fallback ---
+    var _cdnList = [
+      '$maplibreCdnBase/maplibre-gl.js',
+      'https://unpkg.com/maplibre-gl@$maplibreVersion/dist/maplibre-gl.js',
+      'https://fastly.jsdelivr.net/npm/maplibre-gl@$maplibreVersion/dist/maplibre-gl.js'
+    ];
+    var _cdnIdx = 0;
+
+    function _loadMapLibre() {
+      var s = document.createElement('script');
+      s.src = _cdnList[_cdnIdx];
+      s.onload = function() {
+        console.log('maplibre loaded: ' + s.src);
+        _initMap();
+      };
+      s.onerror = function() {
+        console.warn('maplibre cdn failed: ' + s.src);
+        if (++_cdnIdx < _cdnList.length) {
+          _loadMapLibre();
+        } else {
+          console.error('all maplibre CDNs failed');
+        }
+      };
+      document.head.appendChild(s);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', _loadMapLibre);
+    } else {
+      _loadMapLibre();
+    }
   </script>
 </body>
 </html>
@@ -97,47 +284,79 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
   }
 
   void _handleEvent(String jsonStr) {
-    if (!mounted) return;
-    final event = jsonDecode(jsonStr) as Map<String, dynamic>;
-    final type = event['type'] as String;
-    final data = event['data'] as Map<String, dynamic>? ?? {};
-
-    switch (type) {
-      case 'ready':
-        _mapReady = true;
-        _updateAll();
-        break;
-      case 'tap':
-        if (widget.onMapTap != null) {
-          widget.onMapTap!(LatLng(
+    if (!mounted || jsonStr.trim().isEmpty) return;
+    try {
+      final event = jsonDecode(jsonStr) as Map<String, dynamic>;
+      final type = event['type'] as String;
+      final data = event['data'] as Map<String, dynamic>? ?? {};
+      switch (type) {
+        case 'ready':
+          _mapReady = true;
+          _updateAll();
+          break;
+        case 'tap':
+          widget.onMapTap?.call(LatLng(
             (data['lat'] as num).toDouble(),
             (data['lng'] as num).toDouble(),
           ));
-        }
-        break;
-      case 'move':
-        if (data.containsKey('zoom')) {
-          _ctrlImpl._zoom = (data['zoom'] as num).toDouble();
-        }
-        if (data.containsKey('lat') && data.containsKey('lng')) {
-          _ctrlImpl._center = {
-            'lat': (data['lat'] as num).toDouble(),
-            'lng': (data['lng'] as num).toDouble(),
-          };
-        }
-        if (widget.onPositionChanged != null) {
-          widget.onPositionChanged!(data['hasGesture'] == true);
-        }
-        break;
-      case 'markerClick':
-        final id = data['id'] as String;
-        for (final m in widget.markers) {
-          if (m.id == id) {
-            m.onTap?.call();
-            break;
+          break;
+        case 'move':
+          if (data.containsKey('zoom')) {
+            _ctrlImpl._zoom = (data['zoom'] as num).toDouble();
           }
+          if (data.containsKey('lat') && data.containsKey('lng')) {
+            _ctrlImpl._center = {
+              'lat': (data['lat'] as num).toDouble(),
+              'lng': (data['lng'] as num).toDouble(),
+            };
+          }
+          widget.onPositionChanged?.call(data['hasGesture'] == true);
+          break;
+        case 'markerClick':
+          final id = data['id'] as String;
+          for (final m in widget.markers) {
+            if (m.id == id) {
+              m.onTap?.call();
+              break;
+            }
+          }
+          break;
+      }
+    } catch (e) {
+      debugPrint('MapLibre event error: $e');
+    }
+  }
+
+  void _handleTileRequest(String message) {
+    try {
+      final data = jsonDecode(message) as Map<String, dynamic>;
+      final reqId = data['reqId'] as int;
+      final url = data['url'] as String;
+
+      _tileRequests[reqId] = _TileRequest(url);
+
+      http.get(Uri.parse(url), headers: {
+        'Accept': 'application/x-protobuf,application/octet-stream',
+      }).timeout(const Duration(seconds: 15)).then((resp) {
+        _tileRequests.remove(reqId);
+        if (resp.statusCode == 200 || resp.statusCode == 204) {
+          final b64 = base64Encode(resp.bodyBytes);
+          _runJs("window.flutterTileProxyResponse && "
+              "window.flutterTileProxyResponse($reqId, ${jsonEncode(b64)});");
+        } else {
+          final msg = 'HTTP ${resp.statusCode}';
+          _runJs("window.flutterTileProxyError && "
+              "window.flutterTileProxyError($reqId, ${jsonEncode(msg)});");
         }
-        break;
+      }).catchError((e) {
+        _tileRequests.remove(reqId);
+        final msg = e.toString();
+        debugPrint('Tile fetch error: $msg');
+        _runJs("window.flutterTileProxyError && "
+            "window.flutterTileProxyError($reqId, ${jsonEncode(msg)});");
+      });
+    } catch (e) {
+      debugPrint('Tile proxy error: $e');
     }
   }
 
@@ -177,18 +396,47 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
   @override
   Widget build(BuildContext context) {
-    if (_webController == null) {
-      return const ColoredBox(color: Color(0xFF1a0000));
+    if (_initError != null) {
+      return ColoredBox(
+        color: const Color(0xFFe5e5e5),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text('地图加载失败: $_initError',
+                style: const TextStyle(fontSize: 12, color: Colors.red)),
+          ),
+        ),
+      );
     }
-    return WebViewWidget(controller: _webController!);
+    if (_webController == null) {
+      return const ColoredBox(
+        color: Color(0xFFe5e5e5),
+        child: Center(
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+    return SizedBox.expand(
+      child: WebViewWidget(controller: _webController!),
+    );
   }
 
   @override
   void dispose() {
     _runJs("window.__mapCtrl && window.__mapCtrl.destroy();");
     widget.controller?.detach();
+    _tileRequests.clear();
     super.dispose();
   }
+}
+
+class _TileRequest {
+  final String url;
+  _TileRequest(this.url);
 }
 
 class _MobileControllerImpl {

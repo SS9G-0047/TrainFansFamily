@@ -33,8 +33,30 @@
   <link rel="manifest" href="manifest.json">
 
   <!-- MapLibre GL JS for Web platform -->
-  <script src='https://unpkg.com/maplibre-gl@^5.24.0/dist/maplibre-gl.js'></script>
-  <link href='https://unpkg.com/maplibre-gl@^5.24.0/dist/maplibre-gl.css' rel='stylesheet'/>
+  <link href='https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css' rel='stylesheet'/>
+  <script>
+    (function() {
+      var sources = [
+        'https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js',
+        'https://cdn.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js',
+        'https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js',
+        'https://fastly.jsdelivr.net/npm/maplibre-gl@3.6.2/dist/maplibre-gl.js'
+      ];
+      var index = 0;
+      function load() {
+        var script = document.createElement('script');
+        script.src = sources[index];
+        script.onload = function() { console.log('MapLibre loaded: ' + script.src); };
+        script.onerror = function() {
+          index++;
+          if (index < sources.length) load();
+          else console.error('MapLibre failed from all CDN sources');
+        };
+        document.head.appendChild(script);
+      }
+      load();
+    })();
+  </script>
 </head>
 <body>
   <!--
