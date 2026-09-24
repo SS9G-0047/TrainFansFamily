@@ -83,7 +83,8 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     String viewId,
   ) {
     final styleLiteral = jsonEncode(styleJson);
-    final useProxy = _isAndroid ? 'true' : 'false';
+    const useProxy = 'false';
+    final isAndroid = _isAndroid ? 'true' : 'false';
     final centerLng = widget.initialCenter.longitude;
     final centerLat = widget.initialCenter.latitude;
     final initZoom = widget.initialZoom;
@@ -121,6 +122,14 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         console.log('init map, useProxy=' + _useProxy);
 
         var style = JSON.parse($styleLiteral);
+        var _isAndroid = $isAndroid;
+
+        if (_isAndroid && style.layers) {
+          style.layers = style.layers.filter(function(layer) {
+            return layer.type !== 'symbol';
+          });
+          console.log('Android WebView: skipped symbol layers');
+        }
 
         // --- Android: replace railway tiles with tileproxy:// to bypass CORS ---
         if (_useProxy && style.sources && style.sources.railway) {
