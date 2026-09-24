@@ -1,10 +1,10 @@
 import 'dart:convert';
-import 'dart:typed_data';
-
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:webview_all/webview_all.dart';
 
@@ -20,7 +20,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
   // Android only: CORS tile proxy state
   final Map<int, _TileRequest> _tileRequests = {};
-  int _tileReqId = 0;
+  http.Client? _tileClient;
 
   bool get _isAndroid => defaultTargetPlatform == TargetPlatform.android;
 
@@ -37,6 +37,8 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
   Future<void> _init() async {
     try {
       final styleJson = await rootBundle.loadString(maplibreStyleAssetPath);
+      final maplibreJs = await rootBundle.loadString(maplibreJsAssetPath);
+      final maplibreCss = await rootBundle.loadString(maplibreCssAssetPath);
       final viewId = 'maplibre-${identityHashCode(this)}';
 
       final controller = WebViewController();
@@ -59,7 +61,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       });
 
       await controller.loadHtmlString(
-        _buildHtml(styleJson, viewId),
+        _buildHtml(styleJson, maplibreJs, maplibreCss, viewId),
         baseUrl: 'https://maplibre.local/',
       );
 
@@ -74,7 +76,12 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     }
   }
 
-  String _buildHtml(String styleJson, String viewId) {
+  String _buildHtml(
+    String styleJson,
+    String maplibreJs,
+    String maplibreCss,
+    String viewId,
+  ) {
     final styleLiteral = jsonEncode(styleJson);
     final useProxy = _isAndroid ? 'true' : 'false';
     final centerLng = widget.initialCenter.longitude;
@@ -87,8 +94,8 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <link href="$maplibreCdnBase/maplibre-gl.css" rel="stylesheet">
   <style>
+    $maplibreCss
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #f5f5f5; }
     #map { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
@@ -97,6 +104,9 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 </head>
 <body>
   <div id="map"></div>
+  <script>
+    $maplibreJs
+  </script>
   <script>
     $kMapControllerJs
 
@@ -226,7 +236,14 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         return new Promise(function(resolve, reject) {
           var id = ++_seq;
           _pending[id] = { resolve: resolve, reject: reject };
-          var url = 'https://' + params.url.substring(12);
+            var url = params.url.indexOf('tileproxy://') == 0
+              ? 'https://' + params.url.substring(12)
+              : params.url;
+            if (url.indexOf('https://') != 0) {
+            delete _pending[id];
+            reject(new Error('invalid tile URL: ' + params.url));
+            return;
+          }
           try {
             window.flutterTileProxy.postMessage(
               JSON.stringify({ reqId: id, url: url })
@@ -246,15 +263,19 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       console.log('tileproxy protocol registered (promise mode)');
     }
 
-    // --- Load maplibre-gl.js with CDN fallback ---
+    // --- The bundled MapLibre build is used first; CDN is only a fallback. ---
     var _cdnList = [
-      '$maplibreCdnBase/maplibre-gl.js',
-      'https://unpkg.com/maplibre-gl@$maplibreVersion/dist/maplibre-gl.js',
+      'https://cdn.jsdelivr.net/npm/maplibre-gl@$maplibreVersion/dist/maplibre-gl.js',
       'https://fastly.jsdelivr.net/npm/maplibre-gl@$maplibreVersion/dist/maplibre-gl.js'
     ];
     var _cdnIdx = 0;
 
     function _loadMapLibre() {
+      if (typeof maplibregl !== 'undefined') {
+        console.log('maplibre loaded from bundled asset');
+        _initMap();
+        return;
+      }
       var s = document.createElement('script');
       s.src = _cdnList[_cdnIdx];
       s.onload = function() {
@@ -335,16 +356,15 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
       _tileRequests[reqId] = _TileRequest(url);
 
-      http.get(Uri.parse(url), headers: {
-        'Accept': 'application/x-protobuf,application/octet-stream',
-      }).timeout(const Duration(seconds: 15)).then((resp) {
+      _fetchTile(url).then((resp) {
         _tileRequests.remove(reqId);
         if (resp.statusCode == 200 || resp.statusCode == 204) {
           final b64 = base64Encode(resp.bodyBytes);
           _runJs("window.flutterTileProxyResponse && "
               "window.flutterTileProxyResponse($reqId, ${jsonEncode(b64)});");
         } else {
-          final msg = 'HTTP ${resp.statusCode}';
+          final msg = 'HTTP ${resp.statusCode} for $url';
+          debugPrint('Tile request failed: $msg');
           _runJs("window.flutterTileProxyError && "
               "window.flutterTileProxyError($reqId, ${jsonEncode(msg)});");
         }
@@ -358,6 +378,50 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     } catch (e) {
       debugPrint('Tile proxy error: $e');
     }
+  }
+
+  Future<http.Response> _fetchTile(String url) async {
+    final uri = Uri.parse(url);
+    Object? lastError;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final response = await _tileHttpClient.get(uri, headers: {
+          'Accept': 'application/x-protobuf,application/octet-stream',
+          'Referer': 'https://maplibre.local/',
+        }).timeout(const Duration(seconds: 15));
+        if (!_shouldRetryStatus(response.statusCode) || attempt == 1) {
+          return response;
+        }
+      } catch (error) {
+        lastError = error;
+        if (attempt == 1) rethrow;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    throw lastError ?? StateError('Tile request failed: $url');
+  }
+
+  bool _shouldRetryStatus(int statusCode) {
+    return statusCode == 408 ||
+        statusCode == 429 ||
+        statusCode == 500 ||
+        statusCode == 502 ||
+        statusCode == 503 ||
+        statusCode == 504;
+  }
+
+  http.Client get _tileHttpClient {
+    if (_tileClient != null) return _tileClient!;
+    if (!_isAndroid) return _tileClient = http.Client();
+
+    final httpClient = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 10)
+      ..idleTimeout = const Duration(seconds: 20)
+      ..maxConnectionsPerHost = 6
+      ..userAgent =
+          'Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 '
+          '(KHTML, like Gecko) Chrome/120 Mobile Safari/537.36';
+    return _tileClient = IOClient(httpClient);
   }
 
   void _runJs(String code) {
@@ -430,6 +494,8 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     _runJs("window.__mapCtrl && window.__mapCtrl.destroy();");
     widget.controller?.detach();
     _tileRequests.clear();
+    _tileClient?.close();
+    _tileClient = null;
     super.dispose();
   }
 }

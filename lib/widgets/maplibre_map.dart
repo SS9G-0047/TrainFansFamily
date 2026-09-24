@@ -6,6 +6,8 @@ import 'maplibre_map_mobile.dart'
   as platform;
 
 const String maplibreStyleAssetPath = 'lib/assets/maplibre/map_style.json';
+const String maplibreJsAssetPath = 'lib/assets/maplibre/maplibre-gl.js';
+const String maplibreCssAssetPath = 'lib/assets/maplibre/maplibre-gl.css';
 const String maplibreVersion = '3.6.2';
 const String maplibreCdnBase = 'https://unpkg.com/maplibre-gl@$maplibreVersion/dist';
 const double maplibreMinZoom = 4;
@@ -59,7 +61,14 @@ window.createMapController = function(map, viewType) {
     }
   }
 
-  map.on('load', function() { flushPending(); sendEvent('ready'); });
+  function announceReady() {
+    if (ready) return;
+    flushPending();
+    sendEvent('ready');
+  }
+
+  map.on('styledata', announceReady);
+  map.on('load', announceReady);
 
   map.on('dragstart', function() { hasGesture = true; });
   map.on('zoomstart', function() { hasGesture = true; });
@@ -124,22 +133,24 @@ window.createMapController = function(map, viewType) {
       return { lat: c.lat, lng: c.lng };
     },
     setMarkers: function(json) {
-      clearMarkers();
-      var list = JSON.parse(json);
-      list.forEach(function(m) {
-        var el = document.createElement('div');
-        el.style.cssText = 'width:' + m.size + 'px;height:' + m.size + 'px;border-radius:50%;background:' + m.color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);cursor:pointer;flex-shrink:0;';
-        if (m.icon) {
-          el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#fff;font-size:' + Math.floor(m.size * 0.55) + 'px;">' + m.icon + '</div>';
-        }
-        var marker = new maplibregl.Marker(el).setLngLat([m.lng, m.lat]).addTo(map);
-        if (m.hasClick) {
-          el.addEventListener('click', function(e) {
-            e.stopPropagation();
-            sendEvent('markerClick', { id: m.id });
-          });
-        }
-        markers.push(marker);
+      onReady(function() {
+        clearMarkers();
+        var list = JSON.parse(json);
+        list.forEach(function(m) {
+          var el = document.createElement('div');
+          el.style.cssText = 'width:' + m.size + 'px;height:' + m.size + 'px;border-radius:50%;background:' + m.color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);cursor:pointer;flex-shrink:0;';
+          if (m.icon) {
+            el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#fff;font-size:' + Math.floor(m.size * 0.55) + 'px;">' + m.icon + '</div>';
+          }
+          var marker = new maplibregl.Marker(el).setLngLat([m.lng, m.lat]).addTo(map);
+          if (m.hasClick) {
+            el.addEventListener('click', function(e) {
+              e.stopPropagation();
+              sendEvent('markerClick', { id: m.id });
+            });
+          }
+          markers.push(marker);
+        });
       });
     },
     setPolylines: function(json) {
