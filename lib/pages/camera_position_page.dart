@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -950,80 +951,82 @@ class _CameraPositionEditorPageState extends State<CameraPositionEditorPage> {
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              const Expanded(
-                child: Text(
-                  "机位图片",
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+          if (defaultTargetPlatform != TargetPlatform.windows) ...[
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    "机位图片",
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  ),
                 ),
-              ),
-              TextButton.icon(
-                onPressed: _pickFromGallery,
-                icon: const Icon(Icons.photo_library),
-                label: const Text("相册"),
-              ),
-              TextButton.icon(
-                onPressed: _takePhoto,
-                icon: const Icon(Icons.camera_alt),
-                label: const Text("拍摄"),
-              ),
-            ],
-          ),
-          if (_imagePaths.isEmpty)
-            const Text("暂无图片，可从相册上传或拍摄后保存到应用数据中。")
-          else
-            SizedBox(
-              height: 92,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: _imagePaths.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 8),
-                itemBuilder: (context, index) {
-                  final path = _imagePaths[index];
-                  return Stack(
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: crossFileImage(
-                          path,
-                          width: 92,
-                          height: 92,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => Container(
+                TextButton.icon(
+                  onPressed: _pickFromGallery,
+                  icon: const Icon(Icons.photo_library),
+                  label: const Text("相册"),
+                ),
+                TextButton.icon(
+                  onPressed: _takePhoto,
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text("拍摄"),
+                ),
+              ],
+            ),
+            if (_imagePaths.isEmpty)
+              const Text("暂无图片，可从相册上传或拍摄后保存到应用数据中。")
+            else
+              SizedBox(
+                height: 92,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _imagePaths.length,
+                  separatorBuilder: (_, _) => const SizedBox(width: 8),
+                  itemBuilder: (context, index) {
+                    final path = _imagePaths[index];
+                    return Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: crossFileImage(
+                            path,
                             width: 92,
                             height: 92,
-                            color: Colors.black12,
-                            child: const Icon(Icons.broken_image),
-                          ),
-                        ),
-                      ),
-                      Positioned(
-                        top: 0,
-                        right: 0,
-                        child: InkWell(
-                          onTap: () {
-                            setState(() => _imagePaths.removeAt(index));
-                          },
-                          child: Container(
-                            decoration: const BoxDecoration(
-                              color: Colors.black54,
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(
-                              Icons.close,
-                              color: Colors.white,
-                              size: 20,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => Container(
+                              width: 92,
+                              height: 92,
+                              color: Colors.black12,
+                              child: const Icon(Icons.broken_image),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  );
-                },
+                        Positioned(
+                          top: 0,
+                          right: 0,
+                          child: InkWell(
+                            onTap: () {
+                              setState(() => _imagePaths.removeAt(index));
+                            },
+                            child: Container(
+                              decoration: const BoxDecoration(
+                                color: Colors.black54,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.close,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ),
-            ),
+          ],
           const SizedBox(height: 16),
           Row(
             children: [
@@ -1447,7 +1450,8 @@ class _CameraPositionDetailPageState extends State<CameraPositionDetailPage> {
       body: ListView(
         children: [
           _buildMap(position),
-          if (position.imagePaths.isNotEmpty) ...[
+            if (defaultTargetPlatform != TargetPlatform.windows &&
+              position.imagePaths.isNotEmpty) ...[
             const SizedBox(height: 12),
             _buildImageGallery(position),
           ],
