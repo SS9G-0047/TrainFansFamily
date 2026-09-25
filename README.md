@@ -26,12 +26,11 @@
 
 硬件研发中，后续补全。
 
-
 ## 鸣谢
 
 1. Rail.re 提供动车组交路的数据以供查询
 2. OpenCRHTracker 提供动车组交路的数据以供查询
-3.
+3. P@Search 提供机车和车厢配属的数据以供查询
 
 ## About other languages / 关于其它语言支持
 

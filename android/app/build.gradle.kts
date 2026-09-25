@@ -1,3 +1,6 @@
+import java.util.Properties
+import java.io.FileInputStream
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
@@ -27,11 +30,28 @@ android {
         missingDimensionStrategy("maplibre-renderer", "opengl")
     }
 
+    signingConfigs {
+        create("release") {
+            val keystoreFile = rootProject.file("app/key/key.properties")
+            val props = Properties()
+            props.load(FileInputStream(keystoreFile))
+
+            keyAlias = props["keyAlias"] as String
+            keyPassword = props["keyPassword"] as String
+            storeFile = file(props["storeFile"] as String)
+            storePassword = props["storePassword"] as String
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 }
