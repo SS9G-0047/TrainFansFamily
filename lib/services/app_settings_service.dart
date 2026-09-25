@@ -12,9 +12,9 @@ class AppSettingsService extends ChangeNotifier {
   static const String _homeWarningKey = 'home_warning_enabled';
   static const String _voiceBroadcastKey = 'voice_broadcast_enabled';
 
-  bool _floatingOverlayEnabled = true;
-  bool _homeWarningEnabled = true;
-  bool _voiceBroadcastEnabled = true;
+  bool _floatingOverlayEnabled = false;
+  bool _homeWarningEnabled = false;
+  bool _voiceBroadcastEnabled = false;
   bool _loaded = false;
 
   bool get floatingOverlayEnabled => _floatingOverlayEnabled;
@@ -24,9 +24,9 @@ class AppSettingsService extends ChangeNotifier {
 
   Future<void> load() async {
     final sp = await SharedPreferences.getInstance();
-    _floatingOverlayEnabled = sp.getBool(_floatingOverlayKey) ?? true;
-    _homeWarningEnabled = sp.getBool(_homeWarningKey) ?? true;
-    _voiceBroadcastEnabled = sp.getBool(_voiceBroadcastKey) ?? true;
+    _floatingOverlayEnabled = sp.getBool(_floatingOverlayKey) ?? false;
+    _homeWarningEnabled = sp.getBool(_homeWarningKey) ?? false;
+    _voiceBroadcastEnabled = sp.getBool(_voiceBroadcastKey) ?? false;
     _loaded = true;
     notifyListeners();
   }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -1372,26 +1374,42 @@ class CameraPositionDetailPage extends StatefulWidget {
 class _CameraPositionDetailPageState extends State<CameraPositionDetailPage> {
   final CameraPositionService _service = CameraPositionService.instance;
   final MapLibreController _mapController = MapLibreController();
+  Timer? _centerRetryTimer;
 
   @override
   void initState() {
     super.initState();
     _service.addListener(_refresh);
 
-    // 地图就绪后将中心移动到机位坐标。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final pos = _position;
-      if (pos == null) return;
-      final gcj = wgs84ToGcj02(pos.latitude, pos.longitude);
-      _mapController.move(gcj, 15);
+      _centerMapToPosition();
     });
   }
 
   @override
   void dispose() {
+    _centerRetryTimer?.cancel();
     _service.removeListener(_refresh);
     super.dispose();
+  }
+
+  void _centerMapToPosition() {
+    final pos = _position;
+    if (pos == null) return;
+    final gcj = wgs84ToGcj02(pos.latitude, pos.longitude);
+
+    if (_mapController.isReady) {
+      _mapController.move(gcj, 15);
+      _centerRetryTimer?.cancel();
+      _centerRetryTimer = null;
+      return;
+    }
+
+    _centerRetryTimer?.cancel();
+    _centerRetryTimer = Timer(const Duration(milliseconds: 250), () {
+      if (!mounted) return;
+      _centerMapToPosition();
+    });
   }
 
   void _refresh() {

@@ -36,6 +36,18 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
         wgs84ToGcj02(_initialCenter.latitude, _initialCenter.longitude);
 
     _mapController.move(gcj02Center, 12.0);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final location = await NativeLocationService.instance.getCurrentLocation();
+      if (!mounted || location == null) return;
+      final current = LatLng(location.latitude, location.longitude);
+      setState(() {
+        _myLocation = current;
+        _showMyLocation = true;
+      });
+      final gcj02 = wgs84ToGcj02(current.latitude, current.longitude);
+      _mapController.move(gcj02, 15.0);
+    });
   }
 
   @override

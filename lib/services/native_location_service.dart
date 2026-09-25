@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 class NativeLocation {
@@ -42,6 +43,34 @@ class NativeLocationService {
   );
 
   Future<NativeLocation?> getCurrentLocation() async {
+    if (defaultTargetPlatform == TargetPlatform.windows && !kIsWeb) {
+      try {
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied ||
+            permission == LocationPermission.deniedForever) {
+          permission = await Geolocator.requestPermission();
+        }
+        if (permission == LocationPermission.denied ||
+            permission == LocationPermission.deniedForever ||
+            permission == LocationPermission.unableToDetermine) {
+          return null;
+        }
+
+        final position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.low,
+            timeLimit: Duration(seconds: 15),
+          ),
+        );
+        return NativeLocation(
+          latitude: position.latitude,
+          longitude: position.longitude,
+        );
+      } catch (_) {
+        return null;
+      }
+    }
+
     final status = await Permission.locationWhenInUse.request();
     if (!status.isGranted && !status.isLimited) return null;
 

@@ -303,13 +303,22 @@ String _colorToHex(Color c) {
   return '#$red$green$blue';
 }
 
+class _QueuedMapMove {
+  final LatLng center;
+  final double zoom;
+
+  const _QueuedMapMove(this.center, this.zoom);
+}
+
 class MapLibreController {
   dynamic _impl;
   bool _isReady = false;
+  final List<_QueuedMapMove> _pendingMoves = [];
 
   void attach(dynamic impl) {
     _impl = impl;
     _isReady = true;
+    _flushPendingMoves();
   }
 
   void detach() {
@@ -320,7 +329,21 @@ class MapLibreController {
   bool get isReady => _isReady;
 
   void move(LatLng center, double zoom) {
-    _impl?.move(center.latitude, center.longitude, zoom);
+    final move = _QueuedMapMove(center, zoom);
+    if (!_isReady || _impl == null) {
+      _pendingMoves.add(move);
+      return;
+    }
+    _impl.move(center.latitude, center.longitude, zoom);
+  }
+
+  void _flushPendingMoves() {
+    if (!_isReady || _impl == null || _pendingMoves.isEmpty) return;
+    final pending = List<_QueuedMapMove>.from(_pendingMoves);
+    _pendingMoves.clear();
+    for (final move in pending) {
+      _impl.move(move.center.latitude, move.center.longitude, move.zoom);
+    }
   }
 
   double get zoom {

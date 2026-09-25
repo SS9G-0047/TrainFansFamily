@@ -160,6 +160,10 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
         var map = new maplibregl.Map(mapOpts);
 
+        if (_isAndroid) {
+          _setupAndroidRailLabels(map);
+        }
+
         map.on('load', function() {
           console.log('map loaded');
           _forceResize(map);
@@ -207,6 +211,159 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       setTimeout(function() { map.resize(); }, 300);
       setTimeout(function() { map.resize(); }, 800);
       setTimeout(function() { map.resize(); }, 1500);
+    }
+
+    function _setupAndroidRailLabels(map) {
+      var labels = {};
+      var mapRoot = document.getElementById('map');
+      if (!mapRoot) return;
+      mapRoot.style.position = 'relative';
+      mapRoot.style.overflow = 'hidden';
+      var labelContainer = document.createElement('div');
+      labelContainer.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:hidden;z-index:20;display:block;transform:translateZ(0);';
+      mapRoot.appendChild(labelContainer);
+
+      function toText(value) {
+        if (value === undefined || value === null) return '';
+        var text = String(value).trim();
+        if (!text || text === 'null' || text === 'undefined') return '';
+        return text;
+      }
+
+      function pickLabel(properties) {
+        var props = properties || {};
+        return toText(props.name) || toText(props['name:zh']) || toText(props['name_zh']) ||
+          toText(props['name:en']) || toText(props.ref) || toText(props.operator) ||
+          toText(props.route) || toText(props.network) || toText(props.usage) || '';
+      }
+
+      function midpointFromGeometry(geometry) {
+        if (!geometry || !geometry.coordinates) return null;
+        var coords = geometry.coordinates;
+        if (geometry.type === 'MultiLineString') {
+          var chosen = coords[Math.floor(coords.length / 2)] || [];
+          coords = chosen;
+        }
+        if (!Array.isArray(coords) || coords.length === 0) return null;
+        var point = coords[Math.floor(coords.length / 2)];
+        if (!Array.isArray(point) || typeof point[0] !== 'number') return null;
+        return point;
+      }
+
+      function getRailLayerIds() {
+        if (!map || !map.getStyle || typeof map.getStyle !== 'function') return [];
+        try {
+          var style = map.getStyle();
+          if (!style || !style.layers) return [];
+          var ids = [];
+          style.layers.forEach(function(layer) {
+            if (!layer || layer.source !== 'railway') return;
+            if (layer.type === 'line' || layer.type === 'symbol') ids.push(layer.id);
+          });
+          return ids;
+        } catch (e) {
+          console.warn('getRailLayerIds failed: ' + e.message);
+          return [];
+        }
+      }
+
+      function queryRailFeatures() {
+        var combined = [];
+        var railLayerIds = getRailLayerIds();
+
+        if (map && typeof map.queryRenderedFeatures === 'function' && railLayerIds.length) {
+          try {
+            var rendered = map.queryRenderedFeatures({ layers: railLayerIds }) || [];
+            combined = combined.concat(rendered);
+          } catch (e) {
+            console.warn('queryRenderedFeatures failed: ' + e.message);
+          }
+        }
+
+        if (map && typeof map.querySourceFeatures === 'function') {
+          try {
+            var direct = map.querySourceFeatures('railway') || [];
+            combined = combined.concat(direct);
+          } catch (e) {
+            console.warn('railway querySourceFeatures failed: ' + e.message);
+          }
+          try {
+            var layerSpecific = map.querySourceFeatures('railway', { sourceLayer: 'rail_gcj_2' }) || [];
+            combined = combined.concat(layerSpecific);
+          } catch (e) {
+            console.warn('layerSpecific railway querySourceFeatures failed: ' + e.message);
+          }
+        }
+
+        var unique = [];
+        var seen = {};
+        combined.forEach(function(feature) {
+          if (!feature || !feature.properties) return;
+          var sig = (feature.id || '') + ':' + (feature.sourceLayer || '') + ':' +
+            (feature.properties.name || '') + ':' + (feature.properties.ref || '') + ':' +
+            (feature.properties.operator || '') + ':' + (feature.properties.railway || '');
+          if (!sig || seen[sig]) return;
+          seen[sig] = true;
+          unique.push(feature);
+        });
+        return unique;
+      }
+
+      function refreshLabels() {
+        try {
+          var features = queryRailFeatures();
+          if (!features.length) {
+            return;
+          }
+
+          var visible = {};
+          features.forEach(function(feature) {
+            if (!feature || !feature.properties) return;
+            var text = pickLabel(feature.properties);
+            if (!text) return;
+            var coordinate = midpointFromGeometry(feature.geometry);
+            if (!coordinate) return;
+            var key = text + ':' + coordinate[0].toFixed(4) + ':' + coordinate[1].toFixed(4);
+            if (visible[key]) return;
+            visible[key] = { text: text, coordinate: coordinate };
+          });
+
+          Object.keys(labels).forEach(function(key) {
+            if (!visible[key]) {
+              if (labels[key]) {
+                labels[key].remove();
+              }
+              delete labels[key];
+            }
+          });
+
+          Object.keys(visible).slice(0, 200).forEach(function(key) {
+            var item = visible[key];
+            var point = map.project(item.coordinate);
+            var label = labels[key];
+            if (!label) {
+              label = document.createElement('div');
+              label.style.cssText = 'position:absolute;transform:translate(-50%,-50%);padding:1px 4px;color:#26384d;background:rgba(255,255,255,0.82);border:1px solid rgba(70,80,90,0.35);border-radius:2px;font:11px sans-serif;white-space:nowrap;line-height:1.2;text-shadow:0 1px #fff;';
+              label.textContent = item.text;
+              labelContainer.appendChild(label);
+              labels[key] = label;
+            }
+            label.style.left = point.x + 'px';
+            label.style.top = point.y + 'px';
+          });
+        } catch (e) {
+          console.warn('Android label refresh failed: ' + e.message);
+        }
+      }
+
+      map.on('render', refreshLabels);
+      map.on('idle', refreshLabels);
+      map.on('move', refreshLabels);
+      map.on('zoom', refreshLabels);
+      map.on('styledata', refreshLabels);
+      setTimeout(refreshLabels, 200);
+      setTimeout(refreshLabels, 700);
+      setTimeout(refreshLabels, 1400);
     }
 
     // --- Android tile proxy (Promise style per MapLibre v3 API) ---
