@@ -136,11 +136,28 @@ window.createMapController = function(map, viewType) {
       onReady(function() {
         clearMarkers();
         var list = JSON.parse(json);
-        list.forEach(function(m) {
+        list.forEach(function(m, i) {
           var el = document.createElement('div');
-          el.style.cssText = 'width:' + m.size + 'px;height:' + m.size + 'px;border-radius:50%;background:' + m.color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);cursor:pointer;flex-shrink:0;';
-          if (m.icon) {
-            el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#fff;font-size:' + Math.floor(m.size * 0.55) + 'px;">' + m.icon + '</div>';
+          if (m.isMyLocation) {
+            // My location marker: green target-style concentric circles
+            // Outer ring
+            el.style.cssText = 'width:' + m.size + 'px;height:' + m.size + 'px;position:relative;';
+            var ring1 = document.createElement('div');
+            ring1.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;border-radius:50%;border:3px solid ' + m.color + ';background:transparent;box-sizing:border-box;';
+            el.appendChild(ring1);
+            // Middle ring
+            var ring2 = document.createElement('div');
+            ring2.style.cssText = 'position:absolute;top:25%;left:25%;width:50%;height:50%;border-radius:50%;border:2px solid ' + m.color + ';background:transparent;box-sizing:border-box;opacity:0.8;';
+            el.appendChild(ring2);
+            // Center dot
+            var dot = document.createElement('div');
+            dot.style.cssText = 'position:absolute;top:50%;left:50%;width:28%;height:28%;border-radius:50%;background:' + m.color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);transform:translate(-50%,-50%);';
+            el.appendChild(dot);
+          } else {
+            el.style.cssText = 'width:' + m.size + 'px;height:' + m.size + 'px;border-radius:50%;background:' + m.color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);cursor:pointer;flex-shrink:0;';
+            if (m.icon) {
+              el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#fff;font-size:' + Math.floor(m.size * 0.55) + 'px;">' + m.icon + '</div>';
+            }
           }
           var marker = new maplibregl.Marker(el).setLngLat([m.lng, m.lat]).addTo(map);
           if (m.hasClick) {
@@ -234,6 +251,7 @@ class MapMarker {
   final String id;
   final bool hasClick;
   final VoidCallback? onTap;
+  final bool isMyLocation;
 
   MapMarker({
     required this.point,
@@ -243,6 +261,7 @@ class MapMarker {
     this.id = '',
     this.hasClick = false,
     this.onTap,
+    this.isMyLocation = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -253,6 +272,7 @@ class MapMarker {
     'icon': icon,
     'id': id,
     'hasClick': hasClick,
+    'isMyLocation': isMyLocation,
   };
 }
 

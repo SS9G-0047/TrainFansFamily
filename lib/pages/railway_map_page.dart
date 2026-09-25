@@ -70,7 +70,7 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
 
       return MapMarker(
         point: gcj02,
-        color: Colors.red,
+        color: Colors.blue,
         size: 28,
         icon: '*',
         id: pos.id,
@@ -89,8 +89,9 @@ class _RailwayMapPageState extends State<RailwayMapPage> {
     return [
       MapMarker(
         point: gcj02,
-        color: Colors.red,
-        size: 32,
+        color: const Color(0xFF4CAF50),
+        size: 36,
+        isMyLocation: true,
       ),
     ];
   }

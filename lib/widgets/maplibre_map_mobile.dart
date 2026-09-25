@@ -67,7 +67,8 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
       _webController = controller;
       _ctrlImpl._webView = controller;
-      widget.controller?.attach(_ctrlImpl);
+      // Don't attach controller yet — wait for JS 'ready' event
+      // so that move() calls work when the map is actually loaded.
 
       if (mounted) setState(() {});
     } catch (e) {
@@ -479,6 +480,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       switch (type) {
         case 'ready':
           _mapReady = true;
+          widget.controller?.attach(_ctrlImpl);
           _updateAll();
           break;
         case 'tap':

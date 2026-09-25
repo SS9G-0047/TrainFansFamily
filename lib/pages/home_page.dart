@@ -162,7 +162,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
 Widget build(BuildContext context) {
-  final scheme = Theme.of(context).colorScheme;
+  final visibleFunctionList = functionList.where((item) {
+    return _settings.homeWarningEnabled || item.name != '预警器连接';
+  }).toList();
   return Scaffold(
     // appBar: AppBar(
     //   backgroundColor: scheme.inversePrimary,
@@ -182,9 +184,9 @@ Widget build(BuildContext context) {
             ],
             Expanded(
               child: ListView.builder(
-                itemCount: functionList.length,
+                itemCount: visibleFunctionList.length,
                 itemBuilder: (context, index) {
-                  final item = functionList[index];
+                  final item = visibleFunctionList[index];
                   return ListTile(
                     onTap: () {
                       Navigator.push(
