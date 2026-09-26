@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:warningapplication_1/pages/train_search_page.dart';
@@ -5,6 +6,8 @@ import '../models/function_item.dart';
 import '../services/app_settings_service.dart';
 import '../services/ble_warning_service.dart';
 import '../services/trip_service.dart';
+import '../services/update_service.dart';
+import '../widgets/update_dialog.dart';
 import '../widgets/warning_widget.dart';
 import 'camera_position_page.dart';
 import 'connect_page.dart';
@@ -25,8 +28,10 @@ class _MyHomePageState extends State<MyHomePage> {
   final BleWarningService _bleService = BleWarningService.instance;
   final AppSettingsService _settings = AppSettingsService.instance;
   final TripService _tripService = TripService.instance;
+  final UpdateService _updateService = UpdateService.instance;
   late final List<AppFunctionItem> functionList;
   bool _interruptedTripChecked = false;
+  bool _updateChecked = false; // 本次启动是否已检查过更新
 
   @override
   void initState() {
@@ -35,6 +40,8 @@ class _MyHomePageState extends State<MyHomePage> {
     _settings.addListener(_refreshWarning);
     _tripService.addListener(_onTripServiceChanged);
     _settings.load();
+    // 预加载更新服务（获取版本信息）
+    _updateService.initialize();
     functionList = [
       AppFunctionItem(
         icon: Icons.bluetooth_connected,
@@ -89,6 +96,7 @@ class _MyHomePageState extends State<MyHomePage> {
     // 确保监听器已注册后再检查（处理异步加载已完成的情况）
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkInterruptedTrip();
+      _checkAppUpdate(); // 首次进入首页时检查更新
     });
   }
 
@@ -118,6 +126,40 @@ class _MyHomePageState extends State<MyHomePage> {
       if (!mounted) return;
       _showInterruptedTripDialog();
     });
+  }
+
+  /// 检查应用更新
+  ///
+  /// 仅在 Android 和 Windows 平台进行检测，
+  /// 每次启动只检测一次
+  Future<void> _checkAppUpdate() async {
+    if (_updateChecked) return;
+    // 仅支持 Android 和 Windows 平台的自动更新
+    if (!Platform.isAndroid && !Platform.isWindows) return;
+
+    _updateChecked = true;
+
+    // 延迟一点，避免影响首页加载体验
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (!mounted) return;
+
+    final updateInfo = await _updateService.checkUpdate();
+    if (!mounted) return;
+
+    if (updateInfo != null && updateInfo.updateAvailable) {
+      // 有更新，显示对话框
+      if (updateInfo.force) {
+        // 强制更新：不允许关闭
+        if (mounted) {
+          await UpdateDialog.show(context, updateInfo);
+        }
+      } else {
+        // 普通更新
+        if (mounted) {
+          UpdateDialog.show(context, updateInfo);
+        }
+      }
+    }
   }
 
   void _showInterruptedTripDialog() {

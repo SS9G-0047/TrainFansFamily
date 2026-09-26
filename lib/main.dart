@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'pages/home_page.dart';
+import 'services/app_settings_service.dart';
 import 'services/warning_notification_service.dart';
 
 Future<void> main() async {
@@ -59,33 +60,42 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '车迷驿',
-      locale: const Locale('zh', 'CN'),
-      supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      theme: ThemeData(
-        brightness: Brightness.light,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color.fromARGB(255, 37, 157, 255),
-          brightness: Brightness.light,
+    final settings = AppSettingsService.instance;
+    return AnimatedBuilder(
+      animation: settings,
+      builder: (context, child) {
+        return MaterialApp(
+          title: '车迷驿',
+          locale: const Locale('zh', 'CN'),
+          supportedLocales: const [Locale('zh', 'CN'), Locale('en', 'US')],
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          themeMode: settings.followSystemTheme
+              ? ThemeMode.system
+              : ThemeMode.light,
+          theme: ThemeData(
+            brightness: Brightness.light,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color.fromARGB(255, 37, 157, 255),
+              brightness: Brightness.light,
+            ),
+            useMaterial3: true,
         ),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color.fromARGB(255, 37, 157, 255),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
-      home: const MyHomePage(title: '首页'),
-      debugShowCheckedModeBanner: false,
+          darkTheme: ThemeData(
+            brightness: Brightness.dark,
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color.fromARGB(255, 37, 157, 255),
+              brightness: Brightness.dark,
+            ),
+            useMaterial3: true,
+          ),
+          home: const MyHomePage(title: '首页'),
+          debugShowCheckedModeBanner: false,
+        );
+      },
     );
   }
 }

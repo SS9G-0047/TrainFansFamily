@@ -71,6 +71,16 @@ class _SettingPageState extends State<SettingPage> {
             },
           ),
           const Divider(height: 1),
+          SwitchListTile(
+            value: _settings.followSystemTheme,
+            title: const Text("跟随系统深浅模式"),
+            subtitle: const Text("关闭后固定使用亮色模式"),
+            secondary: const Icon(Icons.brightness_6),
+            onChanged: (value) async {
+              await _settings.setFollowSystemTheme(value);
+            },
+          ),
+          const Divider(height: 1),
           ListTile(
             leading: const Icon(Icons.volume_up),
             title: const Text("语音播报复试"),

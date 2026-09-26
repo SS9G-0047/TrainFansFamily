@@ -11,15 +11,18 @@ class AppSettingsService extends ChangeNotifier {
   static const String _floatingOverlayKey = 'floating_overlay_enabled';
   static const String _homeWarningKey = 'home_warning_enabled';
   static const String _voiceBroadcastKey = 'voice_broadcast_enabled';
+  static const String _followSystemThemeKey = 'follow_system_theme';
 
   bool _floatingOverlayEnabled = false;
   bool _homeWarningEnabled = false;
   bool _voiceBroadcastEnabled = false;
+  bool _followSystemTheme = true;
   bool _loaded = false;
 
   bool get floatingOverlayEnabled => _floatingOverlayEnabled;
   bool get homeWarningEnabled => _homeWarningEnabled;
   bool get voiceBroadcastEnabled => _voiceBroadcastEnabled;
+  bool get followSystemTheme => _followSystemTheme;
   bool get loaded => _loaded;
 
   Future<void> load() async {
@@ -27,6 +30,7 @@ class AppSettingsService extends ChangeNotifier {
     _floatingOverlayEnabled = sp.getBool(_floatingOverlayKey) ?? false;
     _homeWarningEnabled = sp.getBool(_homeWarningKey) ?? false;
     _voiceBroadcastEnabled = sp.getBool(_voiceBroadcastKey) ?? false;
+    _followSystemTheme = sp.getBool(_followSystemThemeKey) ?? true;
     _loaded = true;
     notifyListeners();
   }
@@ -53,5 +57,13 @@ class AppSettingsService extends ChangeNotifier {
     notifyListeners();
     final sp = await SharedPreferences.getInstance();
     await sp.setBool(_voiceBroadcastKey, value);
+  }
+
+  Future<void> setFollowSystemTheme(bool value) async {
+    if (_followSystemTheme == value) return;
+    _followSystemTheme = value;
+    notifyListeners();
+    final sp = await SharedPreferences.getInstance();
+    await sp.setBool(_followSystemThemeKey, value);
   }
 }
