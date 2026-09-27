@@ -76,6 +76,7 @@ flutter:
   uses-material-design: true
 
   assets:
+    - lib/assets/version.json
     - lib/assets/maplibre/map_style.json
     - lib/assets/maplibre/maplibre-gl.js
     - lib/assets/maplibre/maplibre-gl.css

@@ -159,6 +159,24 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
           antialias: false
         };
 
+        if (_isAndroid) {
+          mapOpts = {
+            container: 'map',
+            style: style,
+            pixelRatio: 1,
+            antialias: false,
+            fadeDuration: 0,
+            center: [$centerLng, $centerLat],
+            zoom: $initZoom,
+            minZoom: $maplibreMinZoom,
+            maxZoom: $maplibreMaxZoom,
+            dragRotate: false,
+            touchPitch: false,
+            attributionControl: false,
+            antialias: false
+          };
+        }
+
         var map = new maplibregl.Map(mapOpts);
 
         if (_isAndroid) {

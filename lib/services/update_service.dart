@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -54,6 +56,25 @@ class AppUpdateInfo {
     );
   }
 
+  /// 复制并修改 updateAvailable
+  AppUpdateInfo copyWith({bool? updateAvailable}) {
+    return AppUpdateInfo(
+      platform: platform,
+      channel: channel,
+      updateAvailable: updateAvailable ?? this.updateAvailable,
+      buildNumber: buildNumber,
+      versionName: versionName,
+      force: force,
+      changelog: changelog,
+      changelogHtml: changelogHtml,
+      updatedAt: updatedAt,
+      url: url,
+      sha256: sha256,
+      size: size,
+      downloadPage: downloadPage,
+    );
+  }
+
   /// 格式化文件大小
   String get formattedSize {
     if (size == null) return '';
@@ -75,6 +96,24 @@ enum DownloadStatus {
   installing,
 }
 
+/// 本地版本信息
+class LocalVersionInfo {
+  final String versionName;
+  final int buildNumber;
+
+  const LocalVersionInfo({
+    required this.versionName,
+    required this.buildNumber,
+  });
+
+  factory LocalVersionInfo.fromJson(Map<String, dynamic> json) {
+    return LocalVersionInfo(
+      versionName: json['versionName'] as String? ?? '0.0.0',
+      buildNumber: json['buildNumber'] as int? ?? 0,
+    );
+  }
+}
+
 /// 更新服务
 ///
 /// 负责：
@@ -82,7 +121,10 @@ enum DownloadStatus {
 /// - Windows 平台下载安装
 /// - 下载状态管理（供 UI 监听）
 ///
-/// Android 平台的 OTA 安装在 UI 层直接调用 ota_update 插件
+/// 版本读取优先级（从高到低）：
+/// 1. assets/version.json（打包时生成，最可靠）
+/// 2. package_info_plus（原生读取）
+/// 3. 硬编码兜底
 class UpdateService extends ChangeNotifier {
   UpdateService._();
 
@@ -94,9 +136,15 @@ class UpdateService extends ChangeNotifier {
   /// 更新渠道：stable / beta
   static const String channel = 'stable';
 
+  /// 硬编码兜底版本（最后一道防线）
+  static const String _fallbackVersionName = '0.0.2-beta';
+  static const int _fallbackBuildNumber = 3;
+
   final Dio _dio = Dio();
 
   PackageInfo? _packageInfo;
+  LocalVersionInfo? _assetVersion;
+  bool _assetVersionLoaded = false;
   AppUpdateInfo? _latestUpdate;
   DownloadStatus _downloadStatus = DownloadStatus.idle;
   double _downloadProgress = 0.0;
@@ -119,10 +167,41 @@ class UpdateService extends ChangeNotifier {
 
   /// 初始化（获取当前应用版本信息）
   Future<void> initialize() async {
+    // 并行加载两个版本来源
+    await Future.wait([
+      _loadAssetVersion(),
+      _loadPackageInfo(),
+    ]);
+  }
+
+  /// 从 assets/version.json 读取版本（最可靠）
+  Future<void> _loadAssetVersion() async {
+    if (_assetVersionLoaded) return;
+    _assetVersionLoaded = true;
+
+    try {
+      final jsonStr = await rootBundle.loadString('lib/assets/version.json');
+      final json = jsonDecode(jsonStr) as Map<String, dynamic>;
+      _assetVersion = LocalVersionInfo.fromJson(json);
+      debugPrint(
+        '[Update] asset version.json 读取成功: '
+        '${_assetVersion!.versionName}+${_assetVersion!.buildNumber}',
+      );
+    } catch (e) {
+      debugPrint('[Update] 读取 version.json 失败: $e');
+    }
+  }
+
+  /// 从 package_info_plus 读取版本
+  Future<void> _loadPackageInfo() async {
     try {
       _packageInfo = await PackageInfo.fromPlatform();
+      debugPrint(
+        '[Update] package_info_plus 读取结果: '
+        'version=${_packageInfo?.version}, build=${_packageInfo?.buildNumber}',
+      );
     } catch (e) {
-      debugPrint('获取应用版本信息失败: $e');
+      debugPrint('[Update] package_info_plus 读取失败: $e');
     }
   }
 
@@ -136,21 +215,57 @@ class UpdateService extends ChangeNotifier {
     return 'unknown';
   }
 
+  /// 获取本地版本信息
+  ///
+  /// 优先级：asset JSON > package_info_plus > 硬编码兜底
+  LocalVersionInfo get _currentVersion {
+    // 1. 优先用 asset 里的 version.json（打包时生成，最可靠）
+    if (_assetVersion != null && _assetVersion!.buildNumber > 0) {
+      return _assetVersion!;
+    }
+
+    // 2. 其次用 package_info_plus
+    final buildFromPackage =
+        int.tryParse(_packageInfo?.buildNumber ?? '');
+    if (buildFromPackage != null && buildFromPackage > 0) {
+      return LocalVersionInfo(
+        versionName: _packageInfo?.version ?? _fallbackVersionName,
+        buildNumber: buildFromPackage,
+      );
+    }
+
+    // 3. 最后用硬编码兜底
+    debugPrint(
+      '[Update] 使用硬编码兜底版本: $_fallbackVersionName+$_fallbackBuildNumber',
+    );
+    return const LocalVersionInfo(
+      versionName: _fallbackVersionName,
+      buildNumber: _fallbackBuildNumber,
+    );
+  }
+
   /// 检查更新
   ///
-  /// 返回 [AppUpdateInfo]，如果有更新则 [updateAvailable] 为 true
+  /// 返回 [AppUpdateInfo]，如果有更新则 [updateAvailable] 为 true。
+  /// 客户端自己比较 build number，不依赖服务端的 updateAvailable 字段。
   Future<AppUpdateInfo?> checkUpdate() async {
-    if (_packageInfo == null) await initialize();
-    if (_packageInfo == null) return null;
+    if (!_assetVersionLoaded || _packageInfo == null) {
+      await initialize();
+    }
 
     try {
-      final buildNumber = int.tryParse(_packageInfo!.buildNumber) ?? 0;
+      final local = _currentVersion;
+      debugPrint(
+        '[Update] 本地版本: ${local.versionName}+${local.buildNumber} '
+        '(platform=$_platform, channel=$channel)',
+      );
+
       final response = await _dio.get(
         updateUrl,
         queryParameters: {
           'platform': _platform,
           'channel': channel,
-          'build': buildNumber,
+          'build': local.buildNumber,
         },
         options: Options(
           headers: {'Cache-Control': 'no-store'},
@@ -159,8 +274,24 @@ class UpdateService extends ChangeNotifier {
         ),
       );
 
+      debugPrint('[Update] 服务端返回: ${response.data}');
+
       if (response.data is Map<String, dynamic>) {
-        _latestUpdate = AppUpdateInfo.fromJson(response.data);
+        var info = AppUpdateInfo.fromJson(response.data);
+
+        // 客户端自己比对版本
+        final serverBuild = info.buildNumber ?? 0;
+        final hasUpdate = serverBuild > local.buildNumber;
+
+        debugPrint(
+          '[Update] 版本比对: 本地 build=${local.buildNumber}, '
+          '服务端 build=$serverBuild, 是否有更新=$hasUpdate',
+        );
+
+        // 用客户端比对结果覆盖服务端的 updateAvailable
+        info = info.copyWith(updateAvailable: hasUpdate);
+
+        _latestUpdate = info;
         notifyListeners();
         return _latestUpdate;
       }
