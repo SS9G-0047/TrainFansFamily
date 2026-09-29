@@ -1,0 +1,7 @@
+builders:
+  version_builder:
+    import: "package:warningapplication_1/builder/version_builder.dart"
+    builder_factories: ["versionBuilder"]
+    build_extensions: {r"$package$": ["lib/assets/version.json"]}
+    auto_apply: root_package
+    build_to: source

@@ -6,14 +6,123 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:webview_all/webview_all.dart';
+// Android 使用官方 webview_flutter，Windows 使用 webview_all
+import 'package:webview_flutter/webview_flutter.dart' as wv_flutter;
+import 'package:webview_all/webview_all.dart' as wv_all;
 
 import 'maplibre_map.dart';
 
 State<MapLibreMapWidget> createMapLibreState() => _MapLibreMapMobileState();
 
+abstract class _WebViewAdapter {
+  Future<void> setJavaScriptMode(bool unrestricted);
+  Future<void> addJavaScriptChannel(String name, {required void Function(String) onMessageReceived});
+  Future<void> setOnConsoleMessage(void Function(dynamic) callback);
+  Future<void> loadHtmlString(String html, {String? baseUrl});
+  Future<void> runJavaScript(String code);
+  Future<void> clearCache();
+  Widget buildWidget();
+  void dispose();
+}
+
+class _WebViewFlutterAdapter implements _WebViewAdapter {
+  final wv_flutter.WebViewController controller;
+
+  _WebViewFlutterAdapter() : controller = wv_flutter.WebViewController();
+
+  @override
+  Future<void> setJavaScriptMode(bool unrestricted) async {
+    await controller.setJavaScriptMode(
+      unrestricted ? wv_flutter.JavaScriptMode.unrestricted : wv_flutter.JavaScriptMode.disabled,
+    );
+  }
+
+  @override
+  Future<void> addJavaScriptChannel(String name, {required void Function(String) onMessageReceived}) async {
+    await controller.addJavaScriptChannel(
+      name,
+      onMessageReceived: (msg) => onMessageReceived(msg.message),
+    );
+  }
+
+  @override
+  Future<void> setOnConsoleMessage(void Function(dynamic) callback) async {
+    await controller.setOnConsoleMessage((msg) => callback(msg));
+  }
+
+  @override
+  Future<void> loadHtmlString(String html, {String? baseUrl}) async {
+    await controller.loadHtmlString(html, baseUrl: baseUrl);
+  }
+
+  @override
+  Future<void> runJavaScript(String code) async {
+    await controller.runJavaScript(code);
+  }
+
+  @override
+  Future<void> clearCache() async {
+    await controller.clearCache();
+  }
+
+  @override
+  Widget buildWidget() => wv_flutter.WebViewWidget(controller: controller);
+
+  @override
+  void dispose() {}
+}
+
+class _WebViewAllAdapter implements _WebViewAdapter {
+  final wv_all.WebViewController controller;
+
+  _WebViewAllAdapter() : controller = wv_all.WebViewController();
+
+  @override
+  Future<void> setJavaScriptMode(bool unrestricted) async {
+    await controller.setJavaScriptMode(
+      unrestricted ? wv_all.JavaScriptMode.unrestricted : wv_all.JavaScriptMode.disabled,
+    );
+  }
+
+  @override
+  Future<void> addJavaScriptChannel(String name, {required void Function(String) onMessageReceived}) async {
+    await controller.addJavaScriptChannel(
+      name,
+      onMessageReceived: (msg) => onMessageReceived(msg.message),
+    );
+  }
+
+  @override
+  Future<void> setOnConsoleMessage(void Function(dynamic) callback) async {
+    await controller.setOnConsoleMessage(callback);
+  }
+
+  @override
+  Future<void> loadHtmlString(String html, {String? baseUrl}) async {
+    await controller.loadHtmlString(html, baseUrl: baseUrl);
+  }
+
+  @override
+  Future<void> runJavaScript(String code) async {
+    await controller.runJavaScript(code);
+  }
+
+  @override
+  Future<void> clearCache() async {
+    try {
+      await controller.clearCache();
+    } catch (_) {}
+  }
+
+  @override
+  Widget buildWidget() => wv_all.WebViewWidget(controller: controller);
+
+  @override
+  void dispose() {}
+}
+
 class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
-  WebViewController? _webController;
+  _WebViewAdapter? _webController;
   bool _mapReady = false;
   String? _initError;
   late final _MobileControllerImpl _ctrlImpl;
@@ -41,19 +150,25 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       final maplibreCss = await rootBundle.loadString(maplibreCssAssetPath);
       final viewId = 'maplibre-${identityHashCode(this)}';
 
-      final controller = WebViewController();
-      await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
+      // Android 用 webview_flutter，Windows 用 webview_all
+      final controller = _isAndroid
+          ? _WebViewFlutterAdapter()
+          : _WebViewAllAdapter();
+
+      await controller.setJavaScriptMode(true);
       await controller.addJavaScriptChannel(
         'flutterMapEvent',
-        onMessageReceived: (m) => _handleEvent(m.message),
+        onMessageReceived: (m) => _handleEvent(m),
       );
 
       // Only register tile proxy channel on Android
       if (_isAndroid) {
         await controller.addJavaScriptChannel(
           'flutterTileProxy',
-          onMessageReceived: (m) => _handleTileRequest(m.message),
+          onMessageReceived: (m) => _handleTileRequest(m),
         );
+        // 清除 WebView 缓存，避免瓦片被缓存导致不请求新数据
+        await controller.clearCache();
       }
 
       await controller.setOnConsoleMessage((msg) {
@@ -107,6 +222,69 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 <body>
   <div id="map"></div>
   <script>
+    // === 全局错误捕获：打印完整堆栈 ===
+    window.addEventListener('error', function(e) {
+      var err = e.error || {};
+      console.error('[GLOBAL-ERROR] ' + e.message +
+        '\n  filename=' + e.filename +
+        '\n  lineno=' + e.lineno +
+        '\n  colno=' + e.colno +
+        '\n  stack=' + (err.stack || '(no stack)'));
+    });
+
+    // === Android WebView getImageData 兼容补丁 ===
+    (function() {
+      console.log('[PATCH] Applying getImageData patch...');
+      var proto = CanvasRenderingContext2D.prototype;
+      var orig = proto.getImageData;
+      if (!orig) {
+        console.error('[PATCH] getImageData not found on prototype');
+        return;
+      }
+      console.log('[PATCH] Original getImageData: ' + typeof orig);
+
+      proto.getImageData = function(sx, sy, sw, sh) {
+        var fx = Math.floor(Number(sx) || 0);
+        var fy = Math.floor(Number(sy) || 0);
+        var fw = Math.floor(Math.max(1, Number(sw) || 1));
+        var fh = Math.floor(Math.max(1, Number(sh) || 1));
+        try {
+          return orig.call(this, fx, fy, fw, fh);
+        } catch(e1) {
+          // 如果整数参数也失败，尝试返回空 ImageData
+          console.warn('[PATCH] getImageData still failed: ' + e1.message +
+            ' args=(' + sx + ',' + sy + ',' + sw + ',' + sh + ')' +
+            ' floor=(' + fx + ',' + fy + ',' + fw + ',' + fh + ')');
+          try {
+            return this.createImageData(fw, fh);
+          } catch(e2) {
+            return orig.call(this, 0, 0, 1, 1);
+          }
+        }
+      };
+
+      // 同样修补 putImageData
+      var origPut = proto.putImageData;
+      if (origPut) {
+        proto.putImageData = function(imageData, dx, dy) {
+          return origPut.call(this, imageData, Math.floor(dx || 0), Math.floor(dy || 0));
+        };
+      }
+
+      // 测试补丁是否生效
+      try {
+        var testCanvas = document.createElement('canvas');
+        testCanvas.width = 10;
+        testCanvas.height = 10;
+        var testCtx = testCanvas.getContext('2d');
+        var imgData = testCtx.getImageData(0.5, 0.5, 2.7, 2.3);
+        console.log('[PATCH] Test getImageData(0.5,0.5,2.7,2.3) -> width=' + imgData.width + ' height=' + imgData.height + ' OK');
+      } catch(e) {
+        console.error('[PATCH] Test failed: ' + e.message);
+      }
+    })();
+  </script>
+  <script>
     $maplibreJs
   </script>
   <script>
@@ -122,14 +300,82 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       try {
         console.log('init map, useProxy=' + _useProxy);
 
-        var style = JSON.parse($styleLiteral);
         var _isAndroid = $isAndroid;
+        var style = JSON.parse($styleLiteral);
+
+        // === Android 二次补丁：确保 getImageData 参数整数化 ===
+        if (_isAndroid) {
+          (function() {
+            console.log('[PATCH-inside] Applying inside _initMap...');
+            var proto = CanvasRenderingContext2D.prototype;
+            var origGet = proto.getImageData;
+            if (origGet && !origGet.__patched) {
+              proto.getImageData = function(sx, sy, sw, sh) {
+                try {
+                  return origGet.call(
+                    this,
+                    parseInt(sx) || 0,
+                    parseInt(sy) || 0,
+                    Math.max(1, parseInt(sw) || 1),
+                    Math.max(1, parseInt(sh) || 1)
+                  );
+                } catch(e) {
+                  console.warn('[PATCH-inside] getImageData fallback: ' + e.message);
+                  try {
+                    return this.createImageData(Math.max(1, parseInt(sw) || 1), Math.max(1, parseInt(sh) || 1));
+                  } catch(e2) {
+                    return origGet.call(this, 0, 0, 1, 1);
+                  }
+                }
+              };
+              proto.getImageData.__patched = true;
+              console.log('[PATCH-inside] getImageData patched');
+            }
+            // 也拦截 getContext，确保新 canvas 也有补丁
+            var origGetContext = HTMLCanvasElement.prototype.getContext;
+            if (origGetContext && !origGetContext.__patched) {
+              HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                var ctx = origGetContext.call(this, type, attrs);
+                if (ctx && type === '2d' && ctx.getImageData && !ctx.getImageData.__patched) {
+                  var orig = ctx.getImageData.bind(ctx);
+                  ctx.getImageData = function(sx, sy, sw, sh) {
+                    try {
+                      return orig(
+                        parseInt(sx) || 0,
+                        parseInt(sy) || 0,
+                        Math.max(1, parseInt(sw) || 1),
+                        Math.max(1, parseInt(sh) || 1)
+                      );
+                    } catch(e) {
+                      try { return ctx.createImageData(Math.max(1, parseInt(sw) || 1), Math.max(1, parseInt(sh) || 1)); }
+                      catch(e2) { return orig(0, 0, 1, 1); }
+                    }
+                  };
+                  ctx.getImageData.__patched = true;
+                }
+                return ctx;
+              };
+              HTMLCanvasElement.prototype.getContext.__patched = true;
+              console.log('[PATCH-inside] getContext intercepted');
+            }
+          })();
+        }
 
         if (_isAndroid && style.layers) {
+          // Android 兼容性处理：
+          // 1. 移除 glyphs（字形 PBF 在 Android WebView 上导致 mismatched image size 错误）
+          delete style.glyphs;
+          // 2. 移除所有 symbol 图层，避免触发字形渲染
           style.layers = style.layers.filter(function(layer) {
             return layer.type !== 'symbol';
           });
-          console.log('Android WebView: skipped symbol layers');
+          // 3. 移除所有图层的 line-sort-key（避免兼容性问题）
+          style.layers.forEach(function(layer) {
+            if (layer.layout && layer.layout['line-sort-key'] !== undefined) {
+              delete layer.layout['line-sort-key'];
+            }
+          });
+          console.log('Android: glyphs and symbol layers removed for compatibility');
         }
 
         // --- Android: replace railway tiles with tileproxy:// to bypass CORS ---
@@ -173,15 +419,24 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
             dragRotate: false,
             touchPitch: false,
             attributionControl: false,
-            antialias: false
+            antialias: false,
+            transformRequest: function(url, resourceType) {
+              if (resourceType === 'Tile' && url.indexOf('.pbf') > -1) {
+                var sep = url.indexOf('?') > -1 ? '&' : '?';
+                return { url: url + sep + 't=' + Date.now() };
+              }
+              return null;
+            }
           };
         }
 
         var map = new maplibregl.Map(mapOpts);
 
-        if (_isAndroid) {
-          _setupAndroidRailLabels(map);
-        }
+        // 测试模式：用最简单的 symbol 图层验证沿线文字。
+        // 如失败，取消注释恢复 DOM label。
+        // if (_isAndroid) {
+        //   _setupAndroidRailLabels(map);
+        // }
 
         map.on('load', function() {
           console.log('map loaded');
@@ -209,6 +464,61 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
           var url = e && e.tile ? (e.tile.url || '') : '';
           console.warn('tile error [' + src + ']: ' + url);
         });
+
+        // === 调试：瓦片加载成功检测 ===
+        var _loadedTiles = {};
+        map.on('tileload', function(e) {
+          var src = e && e.sourceId ? e.sourceId : '?';
+          var tile = e.tile;
+          var tid = tile && tile.tileID ? tile.tileID.z + '/' + tile.tileID.x + '/' + tile.tileID.y : '?';
+          var key = src + ':' + tid;
+          if (!_loadedTiles[key]) {
+            _loadedTiles[key] = true;
+            console.log('[tileload] source=' + src + ' tile=' + tid + ' state=' + (tile && tile.state));
+            // 如果是 railway source，延迟检查要素
+            if (src === 'railway') {
+              setTimeout(function() {
+                try {
+                  var feats = map.querySourceFeatures('railway', { sourceLayer: 'rail_gcj_2' }) || [];
+                  console.log('[debug] railway features in rail_gcj_2: ' + feats.length);
+                  if (feats.length > 0) {
+                    var f0 = feats[0];
+                    console.log('[debug] first feature: layer=' + (f0.sourceLayer || '?') +
+                      ' type=' + (f0.geometry && f0.geometry.type || '?') +
+                      ' props=' + JSON.stringify(f0.properties || {}).substring(0, 200));
+                  }
+                  // 也检查一下其他可能的 sourceLayer
+                  var allLayers = map.getStyle() && map.getStyle().layers || [];
+                  var railLayers = allLayers.filter(function(l) { return l.source === 'railway'; });
+                  console.log('[debug] railway layers count: ' + railLayers.length);
+                  railLayers.slice(0, 5).forEach(function(l) {
+                    console.log('[debug]   layer: id=' + l.id + ' type=' + l.type +
+                      ' source-layer=' + (l['source-layer'] || '?') +
+                      ' minzoom=' + (l.minzoom || 'none') +
+                      ' visible=' + (l.layout && l.layout.visibility !== 'none'));
+                  });
+                } catch(err) {
+                  console.error('[debug] query error: ' + err.message);
+                }
+              }, 500);
+            }
+          }
+        });
+
+        // === 调试：WebGL 检测 ===
+        if (_isAndroid) {
+          try {
+            var canvas = document.createElement('canvas');
+            var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+            console.log('[debug] WebGL available: ' + !!gl);
+            if (gl) {
+              console.log('[debug] WebGL vendor: ' + gl.getParameter(gl.VENDOR) +
+                ', renderer: ' + gl.getParameter(gl.RENDERER));
+            }
+          } catch(e) {
+            console.error('[debug] WebGL check error: ' + e.message);
+          }
+        }
 
         // Resize handling
         var resizeTimer = null;
@@ -671,7 +981,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       );
     }
     return SizedBox.expand(
-      child: WebViewWidget(controller: _webController!),
+      child: _webController!.buildWidget(),
     );
   }
 
@@ -692,7 +1002,7 @@ class _TileRequest {
 }
 
 class _MobileControllerImpl {
-  WebViewController? _webView;
+  _WebViewAdapter? _webView;
   double _zoom;
   Map<String, double> _center;
 
