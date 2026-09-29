@@ -2,14 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 
 import 'maplibre_map_mobile.dart'
-  if (dart.library.html) 'maplibre_map_web.dart'
-  as platform;
+    if (dart.library.html) 'maplibre_map_web.dart'
+    as platform;
 
 const String maplibreStyleAssetPath = 'lib/assets/maplibre/map_style.json';
 const String maplibreJsAssetPath = 'lib/assets/maplibre/maplibre-gl.js';
 const String maplibreCssAssetPath = 'lib/assets/maplibre/maplibre-gl.css';
-const String maplibreVersion = '3.6.2';
-const String maplibreCdnBase = 'https://unpkg.com/maplibre-gl@$maplibreVersion/dist';
+const String maplibreVersion = '4.7.1';
+const String maplibreCdnBase =
+    'https://unpkg.com/maplibre-gl@$maplibreVersion/dist';
 const double maplibreMinZoom = 4;
 const double maplibreMaxZoom = 19;
 
@@ -262,14 +263,12 @@ class MapPolyline {
   final Color color;
   final double width;
 
-  MapPolyline({
-    required this.points,
-    this.color = Colors.red,
-    this.width = 3,
-  });
+  MapPolyline({required this.points, this.color = Colors.red, this.width = 3});
 
   Map<String, dynamic> toJson() => {
-    'points': points.map((p) => {'lat': p.latitude, 'lng': p.longitude}).toList(),
+    'points': points
+        .map((p) => {'lat': p.latitude, 'lng': p.longitude})
+        .toList(),
     'color': _colorToHex(color),
     'width': width,
   };
@@ -298,9 +297,21 @@ class MapCircle {
 }
 
 String _colorToHex(Color c) {
-  final red = (c.r * 255).round().clamp(0, 255).toRadixString(16).padLeft(2, '0');
-  final green = (c.g * 255).round().clamp(0, 255).toRadixString(16).padLeft(2, '0');
-  final blue = (c.b * 255).round().clamp(0, 255).toRadixString(16).padLeft(2, '0');
+  final red = (c.r * 255)
+      .round()
+      .clamp(0, 255)
+      .toRadixString(16)
+      .padLeft(2, '0');
+  final green = (c.g * 255)
+      .round()
+      .clamp(0, 255)
+      .toRadixString(16)
+      .padLeft(2, '0');
+  final blue = (c.b * 255)
+      .round()
+      .clamp(0, 255)
+      .toRadixString(16)
+      .padLeft(2, '0');
   return '#$red$green$blue';
 }
 

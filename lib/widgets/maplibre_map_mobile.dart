@@ -16,7 +16,10 @@ State<MapLibreMapWidget> createMapLibreState() => _MapLibreMapMobileState();
 
 abstract class _WebViewAdapter {
   Future<void> setJavaScriptMode(bool unrestricted);
-  Future<void> addJavaScriptChannel(String name, {required void Function(String) onMessageReceived});
+  Future<void> addJavaScriptChannel(
+    String name, {
+    required void Function(String) onMessageReceived,
+  });
   Future<void> setOnConsoleMessage(void Function(dynamic) callback);
   Future<void> loadHtmlString(String html, {String? baseUrl});
   Future<void> runJavaScript(String code);
@@ -33,12 +36,17 @@ class _WebViewFlutterAdapter implements _WebViewAdapter {
   @override
   Future<void> setJavaScriptMode(bool unrestricted) async {
     await controller.setJavaScriptMode(
-      unrestricted ? wv_flutter.JavaScriptMode.unrestricted : wv_flutter.JavaScriptMode.disabled,
+      unrestricted
+          ? wv_flutter.JavaScriptMode.unrestricted
+          : wv_flutter.JavaScriptMode.disabled,
     );
   }
 
   @override
-  Future<void> addJavaScriptChannel(String name, {required void Function(String) onMessageReceived}) async {
+  Future<void> addJavaScriptChannel(
+    String name, {
+    required void Function(String) onMessageReceived,
+  }) async {
     await controller.addJavaScriptChannel(
       name,
       onMessageReceived: (msg) => onMessageReceived(msg.message),
@@ -80,12 +88,17 @@ class _WebViewAllAdapter implements _WebViewAdapter {
   @override
   Future<void> setJavaScriptMode(bool unrestricted) async {
     await controller.setJavaScriptMode(
-      unrestricted ? wv_all.JavaScriptMode.unrestricted : wv_all.JavaScriptMode.disabled,
+      unrestricted
+          ? wv_all.JavaScriptMode.unrestricted
+          : wv_all.JavaScriptMode.disabled,
     );
   }
 
   @override
-  Future<void> addJavaScriptChannel(String name, {required void Function(String) onMessageReceived}) async {
+  Future<void> addJavaScriptChannel(
+    String name, {
+    required void Function(String) onMessageReceived,
+  }) async {
     await controller.addJavaScriptChannel(
       name,
       onMessageReceived: (msg) => onMessageReceived(msg.message),
@@ -432,11 +445,10 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
         var map = new maplibregl.Map(mapOpts);
 
-        // 测试模式：用最简单的 symbol 图层验证沿线文字。
-        // 如失败，取消注释恢复 DOM label。
-        // if (_isAndroid) {
-        //   _setupAndroidRailLabels(map);
-        // }
+        // Android WebView 可能缺少远程 PBF 字形，用系统字体绘制线路名称。
+        if (_isAndroid) {
+          _setupAndroidRailLabels(map);
+        }
 
         map.on('load', function() {
           console.log('map loaded');
@@ -544,6 +556,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
     function _setupAndroidRailLabels(map) {
       var labels = {};
+      var minLabelZoom = 10;
       var mapRoot = document.getElementById('map');
       if (!mapRoot) return;
       mapRoot.style.position = 'relative';
@@ -640,8 +653,20 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
       function refreshLabels() {
         try {
+          if (map.getZoom() < minLabelZoom) {
+            Object.keys(labels).forEach(function(key) {
+              if (labels[key]) labels[key].remove();
+              delete labels[key];
+            });
+            return;
+          }
+
           var features = queryRailFeatures();
           if (!features.length) {
+            Object.keys(labels).forEach(function(key) {
+              if (labels[key]) labels[key].remove();
+              delete labels[key];
+            });
             return;
           }
 
@@ -812,10 +837,12 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
           _updateAll();
           break;
         case 'tap':
-          widget.onMapTap?.call(LatLng(
-            (data['lat'] as num).toDouble(),
-            (data['lng'] as num).toDouble(),
-          ));
+          widget.onMapTap?.call(
+            LatLng(
+              (data['lat'] as num).toDouble(),
+              (data['lng'] as num).toDouble(),
+            ),
+          );
           break;
         case 'move':
           if (data.containsKey('zoom')) {
@@ -852,25 +879,33 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
       _tileRequests[reqId] = _TileRequest(url);
 
-      _fetchTile(url).then((resp) {
-        _tileRequests.remove(reqId);
-        if (resp.statusCode == 200 || resp.statusCode == 204) {
-          final b64 = base64Encode(resp.bodyBytes);
-          _runJs("window.flutterTileProxyResponse && "
-              "window.flutterTileProxyResponse($reqId, ${jsonEncode(b64)});");
-        } else {
-          final msg = 'HTTP ${resp.statusCode} for $url';
-          debugPrint('Tile request failed: $msg');
-          _runJs("window.flutterTileProxyError && "
-              "window.flutterTileProxyError($reqId, ${jsonEncode(msg)});");
-        }
-      }).catchError((e) {
-        _tileRequests.remove(reqId);
-        final msg = e.toString();
-        debugPrint('Tile fetch error: $msg');
-        _runJs("window.flutterTileProxyError && "
-            "window.flutterTileProxyError($reqId, ${jsonEncode(msg)});");
-      });
+      _fetchTile(url)
+          .then((resp) {
+            _tileRequests.remove(reqId);
+            if (resp.statusCode == 200 || resp.statusCode == 204) {
+              final b64 = base64Encode(resp.bodyBytes);
+              _runJs(
+                "window.flutterTileProxyResponse && "
+                "window.flutterTileProxyResponse($reqId, ${jsonEncode(b64)});",
+              );
+            } else {
+              final msg = 'HTTP ${resp.statusCode} for $url';
+              debugPrint('Tile request failed: $msg');
+              _runJs(
+                "window.flutterTileProxyError && "
+                "window.flutterTileProxyError($reqId, ${jsonEncode(msg)});",
+              );
+            }
+          })
+          .catchError((e) {
+            _tileRequests.remove(reqId);
+            final msg = e.toString();
+            debugPrint('Tile fetch error: $msg');
+            _runJs(
+              "window.flutterTileProxyError && "
+              "window.flutterTileProxyError($reqId, ${jsonEncode(msg)});",
+            );
+          });
     } catch (e) {
       debugPrint('Tile proxy error: $e');
     }
@@ -881,10 +916,15 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     Object? lastError;
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
-        final response = await _tileHttpClient.get(uri, headers: {
-          'Accept': 'application/x-protobuf,application/octet-stream',
-          'Referer': 'https://maplibre.local/',
-        }).timeout(const Duration(seconds: 15));
+        final response = await _tileHttpClient
+            .get(
+              uri,
+              headers: {
+                'Accept': 'application/x-protobuf,application/octet-stream',
+                'Referer': 'https://maplibre.local/',
+              },
+            )
+            .timeout(const Duration(seconds: 15));
         if (!_shouldRetryStatus(response.statusCode) || attempt == 1) {
           return response;
         }
@@ -933,19 +973,25 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
   void _updateMarkers() {
     if (!_mapReady) return;
     final json = jsonEncode(widget.markers.map((m) => m.toJson()).toList());
-    _runJs("window.__mapCtrl && window.__mapCtrl.setMarkers(${jsonEncode(json)});");
+    _runJs(
+      "window.__mapCtrl && window.__mapCtrl.setMarkers(${jsonEncode(json)});",
+    );
   }
 
   void _updatePolylines() {
     if (!_mapReady) return;
     final json = jsonEncode(widget.polylines.map((p) => p.toJson()).toList());
-    _runJs("window.__mapCtrl && window.__mapCtrl.setPolylines(${jsonEncode(json)});");
+    _runJs(
+      "window.__mapCtrl && window.__mapCtrl.setPolylines(${jsonEncode(json)});",
+    );
   }
 
   void _updateCircles() {
     if (!_mapReady) return;
     final json = jsonEncode(widget.circles.map((c) => c.toJson()).toList());
-    _runJs("window.__mapCtrl && window.__mapCtrl.setCircles(${jsonEncode(json)});");
+    _runJs(
+      "window.__mapCtrl && window.__mapCtrl.setCircles(${jsonEncode(json)});",
+    );
   }
 
   @override
@@ -962,8 +1008,10 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         child: Center(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Text('地图加载失败: $_initError',
-                style: const TextStyle(fontSize: 12, color: Colors.red)),
+            child: Text(
+              '地图加载失败: $_initError',
+              style: const TextStyle(fontSize: 12, color: Colors.red),
+            ),
           ),
         ),
       );
@@ -980,9 +1028,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         ),
       );
     }
-    return SizedBox.expand(
-      child: _webController!.buildWidget(),
-    );
+    return SizedBox.expand(child: _webController!.buildWidget());
   }
 
   @override
