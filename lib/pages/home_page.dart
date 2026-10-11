@@ -9,6 +9,7 @@ import '../services/trip_service.dart';
 import '../services/update_service.dart';
 import '../widgets/update_dialog.dart';
 import '../widgets/warning_widget.dart';
+import 'about_page.dart';
 import 'camera_position_page.dart';
 import 'connect_page.dart';
 import 'history_page.dart';
@@ -84,6 +85,12 @@ class _MyHomePageState extends State<MyHomePage> {
         name: "系统设置",
         themeColor: Colors.grey.shade700,
         targetPage: const SettingPage(),
+      ),
+      AppFunctionItem(
+        icon: Icons.info_outline,
+        name: "关于",
+        themeColor: Colors.blueGrey,
+        targetPage: const AboutPage(),
       ),
     ].where((item) {
       // Windows 剔除预警器连接

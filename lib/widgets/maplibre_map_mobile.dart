@@ -315,6 +315,12 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
         var _isAndroid = $isAndroid;
         var style = JSON.parse($styleLiteral);
+        var railLabelMinZooms = {};
+        (style.layers || []).forEach(function(layer) {
+          if (layer.id && layer.id.indexOf('rw-label-') === 0) {
+            railLabelMinZooms[layer.id] = layer.minzoom || 0;
+          }
+        });
 
         // === Android 二次补丁：确保 getImageData 参数整数化 ===
         if (_isAndroid) {
@@ -382,13 +388,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
           style.layers = style.layers.filter(function(layer) {
             return layer.type !== 'symbol';
           });
-          // 3. 移除所有图层的 line-sort-key（避免兼容性问题）
-          style.layers.forEach(function(layer) {
-            if (layer.layout && layer.layout['line-sort-key'] !== undefined) {
-              delete layer.layout['line-sort-key'];
-            }
-          });
-          console.log('Android: glyphs and symbol layers removed for compatibility');
+          console.log('Android: glyphs and symbol layers removed; railway sort keys preserved');
         }
 
         // --- Android: replace railway tiles with tileproxy:// to bypass CORS ---
@@ -447,7 +447,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
         // Android WebView 可能缺少远程 PBF 字形，用系统字体绘制线路名称。
         if (_isAndroid) {
-          _setupAndroidRailLabels(map);
+          _setupAndroidRailLabels(map, railLabelMinZooms);
         }
 
         map.on('load', function() {
@@ -554,9 +554,13 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
       setTimeout(function() { map.resize(); }, 1500);
     }
 
-    function _setupAndroidRailLabels(map) {
+    function _setupAndroidRailLabels(map, minZooms) {
       var labels = {};
-      var minLabelZoom = 10;
+      minZooms = minZooms || {};
+      var minLineZoom = minZooms['rw-label-line-main'] || 7;
+      var minMetroLineZoom = minZooms['rw-label-line-metro'] || 10;
+      var minStationZoom = minZooms['rw-label-station-main'] || 7;
+      var minMetroStationZoom = minZooms['rw-label-station-metro'] || 10;
       var mapRoot = document.getElementById('map');
       if (!mapRoot) return;
       mapRoot.style.position = 'relative';
@@ -572,24 +576,108 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         return text;
       }
 
-      function pickLabel(properties) {
+      function pickLabel(properties, isStation) {
         var props = properties || {};
-        return toText(props.name) || toText(props['name:zh']) || toText(props['name_zh']) ||
-          toText(props['name:en']) || toText(props.ref) || toText(props.operator) ||
-          toText(props.route) || toText(props.network) || toText(props.usage) || '';
+        if (isStation) {
+          return toText(props.station_name) || toText(props['name:zh']) ||
+            toText(props.name_zh) || toText(props.name) || toText(props.station) || '';
+        }
+        return toText(props.name) || toText(props['name:zh']) ||
+          toText(props.name_zh) || toText(props.ref) || '';
       }
 
-      function midpointFromGeometry(geometry) {
+      function midpointFromLine(geometry) {
         if (!geometry || !geometry.coordinates) return null;
         var coords = geometry.coordinates;
         if (geometry.type === 'MultiLineString') {
-          var chosen = coords[Math.floor(coords.length / 2)] || [];
-          coords = chosen;
+          coords = coords.reduce(function(longest, part) {
+            return part.length > longest.length ? part : longest;
+          }, []);
         }
         if (!Array.isArray(coords) || coords.length === 0) return null;
         var point = coords[Math.floor(coords.length / 2)];
         if (!Array.isArray(point) || typeof point[0] !== 'number') return null;
         return point;
+      }
+
+      function anchorFromGeometry(geometry) {
+        if (!geometry || !geometry.coordinates) return null;
+        var coords = geometry.coordinates;
+        if (geometry.type === 'Point') return coords;
+        if (geometry.type === 'MultiPoint') return coords[0] || null;
+        if (geometry.type === 'LineString' || geometry.type === 'MultiLineString') {
+          return midpointFromLine(geometry);
+        }
+        if (geometry.type === 'Polygon' || geometry.type === 'MultiPolygon') {
+          var rings = geometry.type === 'Polygon' ? coords : (coords[0] || []);
+          var ring = rings[0] || [];
+          if (!ring.length) return null;
+          var totalLng = 0;
+          var totalLat = 0;
+          var count = ring.length > 1 ? ring.length - 1 : ring.length;
+          for (var i = 0; i < count; i++) {
+            totalLng += ring[i][0];
+            totalLat += ring[i][1];
+          }
+          return [totalLng / count, totalLat / count];
+        }
+        return null;
+      }
+
+      function labelCandidate(feature, zoom) {
+        var props = feature.properties || {};
+        var geometry = feature.geometry;
+        var railway = toText(props.railway).toLowerCase();
+        var publicTransport = toText(props.public_transport).toLowerCase();
+        var building = toText(props.building).toLowerCase();
+        var metroTypes = ['subway', 'light_rail', 'tram', 'monorail'];
+        var isMetro = metroTypes.indexOf(railway) !== -1 ||
+          metroTypes.indexOf(toText(props.station).toLowerCase()) !== -1 ||
+          metroTypes.indexOf(toText(props.network).toLowerCase()) !== -1;
+        var stationTypes = ['station', 'halt', 'stop', 'tram_stop', 'subway_entrance'];
+        var isStation = stationTypes.indexOf(railway) !== -1 ||
+          ['station', 'stop_position', 'platform'].indexOf(publicTransport) !== -1 ||
+          railway === 'platform' ||
+          ['train_station', 'station'].indexOf(building) !== -1;
+        var isLine = geometry &&
+          (geometry.type === 'LineString' || geometry.type === 'MultiLineString') &&
+          railway && !isStation &&
+          ['service', 'spur', 'crossover'].indexOf(railway) === -1;
+
+        if (isLine) {
+          var lineMinZoom = isMetro ? minMetroLineZoom : minLineZoom;
+          if (zoom < lineMinZoom) return null;
+          var lineText = pickLabel(props, false);
+          var lineCoordinate = midpointFromLine(geometry);
+          if (!lineText || !lineCoordinate) return null;
+          return {
+            text: lineText,
+            coordinate: lineCoordinate,
+            priority: 0,
+            layer: Number(props.layer) || 0,
+            key: 'line:' + lineText + ':' +
+              (Number(props.layer) || 0) + ':' +
+              Math.round(lineCoordinate[0] * 30) + ':' +
+              Math.round(lineCoordinate[1] * 30)
+          };
+        }
+
+        if (isStation) {
+          var stationMinZoom = isMetro ? minMetroStationZoom : minStationZoom;
+          if (zoom < stationMinZoom) return null;
+          var stationText = pickLabel(props, true);
+          var coordinate = anchorFromGeometry(geometry);
+          if (!stationText || !coordinate) return null;
+          return {
+            text: stationText,
+            coordinate: coordinate,
+            priority: 1,
+            layer: Number(props.layer) || 0,
+            key: 'station:' + stationText + ':' + (Number(props.layer) || 0) + ':' +
+              coordinate[0].toFixed(4) + ':' + coordinate[1].toFixed(4)
+          };
+        }
+        return null;
       }
 
       function getRailLayerIds() {
@@ -653,58 +741,55 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
       function refreshLabels() {
         try {
-          if (map.getZoom() < minLabelZoom) {
-            Object.keys(labels).forEach(function(key) {
-              if (labels[key]) labels[key].remove();
-              delete labels[key];
-            });
-            return;
-          }
-
+          var zoom = map.getZoom();
           var features = queryRailFeatures();
-          if (!features.length) {
-            Object.keys(labels).forEach(function(key) {
-              if (labels[key]) labels[key].remove();
-              delete labels[key];
-            });
-            return;
-          }
-
-          var visible = {};
+          var candidates = {};
           features.forEach(function(feature) {
             if (!feature || !feature.properties) return;
-            var text = pickLabel(feature.properties);
-            if (!text) return;
-            var coordinate = midpointFromGeometry(feature.geometry);
-            if (!coordinate) return;
-            var key = text + ':' + coordinate[0].toFixed(4) + ':' + coordinate[1].toFixed(4);
-            if (visible[key]) return;
-            visible[key] = { text: text, coordinate: coordinate };
-          });
-
-          Object.keys(labels).forEach(function(key) {
-            if (!visible[key]) {
-              if (labels[key]) {
-                labels[key].remove();
-              }
-              delete labels[key];
+            var candidate = labelCandidate(feature, zoom);
+            if (!candidate || !candidate.coordinate) return;
+            if (!candidates[candidate.key] || candidate.priority < candidates[candidate.key].priority) {
+              candidates[candidate.key] = candidate;
             }
           });
 
-          Object.keys(visible).slice(0, 200).forEach(function(key) {
-            var item = visible[key];
+          var placed = [];
+          var nextLabels = {};
+          Object.keys(candidates).map(function(key) {
+            candidates[key].key = key;
+            return candidates[key];
+          }).sort(function(a, b) {
+            return b.layer - a.layer || a.priority - b.priority;
+          }).forEach(function(item) {
             var point = map.project(item.coordinate);
-            var label = labels[key];
+            if (!isFinite(point.x) || !isFinite(point.y) || point.x < 0 || point.y < 0 ||
+                point.x > mapRoot.clientWidth || point.y > mapRoot.clientHeight) return;
+            var width = Math.max(24, item.text.length * 7 + 10);
+            var box = { left: point.x - width / 2, right: point.x + width / 2,
+              top: point.y - 9, bottom: point.y + 9 };
+            var collides = placed.some(function(other) {
+              return box.left < other.right && box.right > other.left &&
+                box.top < other.bottom && box.bottom > other.top;
+            });
+            if (collides) return;
+
+            var label = labels[item.key];
             if (!label) {
               label = document.createElement('div');
               label.style.cssText = 'position:absolute;transform:translate(-50%,-50%);padding:1px 4px;color:#26384d;background:rgba(255,255,255,0.82);border:1px solid rgba(70,80,90,0.35);border-radius:2px;font:11px sans-serif;white-space:nowrap;line-height:1.2;text-shadow:0 1px #fff;';
               label.textContent = item.text;
               labelContainer.appendChild(label);
-              labels[key] = label;
             }
             label.style.left = point.x + 'px';
             label.style.top = point.y + 'px';
+            nextLabels[item.key] = label;
+            placed.push(box);
           });
+
+          Object.keys(labels).forEach(function(key) {
+            if (!nextLabels[key] && labels[key]) labels[key].remove();
+          });
+          labels = nextLabels;
         } catch (e) {
           console.warn('Android label refresh failed: ' + e.message);
         }

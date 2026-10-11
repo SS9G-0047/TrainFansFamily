@@ -52,6 +52,7 @@ dependencies:
   package_info_plus: ^10.2.1
   dio: ^5.7.0
   ota_update: ^7.1.0
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:
@@ -79,6 +80,7 @@ flutter:
   uses-material-design: true
 
   assets:
+    - lib/assets/icon/logo_1024.png
     - lib/assets/version.json
     - lib/assets/maplibre/map_style.json
     - lib/assets/maplibre/maplibre-gl.js
