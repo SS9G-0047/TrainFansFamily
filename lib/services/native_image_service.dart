@@ -40,7 +40,7 @@ class NativeImageService {
 
   static final NativeImageService instance = NativeImageService._();
   static const MethodChannel _channel = MethodChannel(
-    'com.example.warningapplication_1/native_images',
+    'com.example.train_fans_family/native_images',
   );
 
   Future<bool> requestImagePermission() async {

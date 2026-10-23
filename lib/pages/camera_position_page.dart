@@ -4,8 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:warningapplication_1/utils/map_config.dart';
-import 'package:warningapplication_1/widgets/maplibre_map.dart';
+import 'package:train_fans_family/utils/map_config.dart';
+import 'package:train_fans_family/widgets/maplibre_map.dart';
 
 import '../models/camera_position.dart' as cam_model;
 import '../services/camera_position_service.dart';
@@ -1477,7 +1477,7 @@ class _CameraPositionDetailPageState extends State<CameraPositionDetailPage> {
             initialZoom: 17,
             controller: _mapController,
             markers: [
-              MapMarker(point: gcjPoint, color: Colors.red, size: 32),
+              MapMarker(point: gcjPoint, color: const Color(0xFF2E7D32), size: 24),
             ],
           ),
           const MapAttribution(),

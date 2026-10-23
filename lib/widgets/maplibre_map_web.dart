@@ -25,7 +25,9 @@ class _MapLibreMapWebState extends State<MapLibreMapWidget> {
   }
 
   Future<void> _init() async {
-    _styleJson = await rootBundle.loadString(maplibreStyleAssetPath);
+    _styleJson = resolveMapStyle(
+      await rootBundle.loadString(maplibreStyleAssetPath),
+    );
     _viewType = 'maplibre-${identityHashCode(this)}';
 
     _ensureControllerScript();
@@ -151,6 +153,7 @@ class _MapLibreMapWebState extends State<MapLibreMapWidget> {
     _updateMarkers();
     _updatePolylines();
     _updateCircles();
+    _updateStationLabels();
   }
 
   void _updateMarkers() {
@@ -172,6 +175,14 @@ class _MapLibreMapWebState extends State<MapLibreMapWidget> {
     if (ctrl == null) return;
     final json = jsonEncode(widget.circles.map((c) => c.toJson()).toList());
     ctrl.callMethod('setCircles', [json]);
+  }
+
+  void _updateStationLabels() {
+    final ctrl = _getController();
+    if (ctrl == null) return;
+    final json =
+        jsonEncode(widget.stationLabels.map((s) => s.toJson()).toList());
+    ctrl.callMethod('setStationLabels', [json]);
   }
 
   @override

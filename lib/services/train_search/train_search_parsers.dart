@@ -23,7 +23,7 @@ int? _pasCurrentPage(String body) {
 /// 从页面里抠出「下一页」那个 <a> 的真实 href。
 ///
 /// 真实页面长这样（车厢站实测）：
-///   <a href="https://cr400bf.passearch.info/index.php?type=model&amp;keyword=YW25G&amp;pagenum=2">下一页</a>
+///   <a href="/index.php?type=model&amp;keyword=YW25G&amp;pagenum=2">下一页</a>
 ///
 /// ⚠️ 为什么要用它，而不是自己拼 URL：
 ///    自己拼 = 赌参数名（pagenum）+ 赌参数顺序 + 赌关键字的编码方式。
@@ -623,7 +623,7 @@ String _hhmm(int? sec) {
       '${t.minute.toString().padLeft(2, '0')}';
 }
 
-/// OpenCRHTracker 的 serviceDay：按上海时间自 1970-01-01 起的天数
+/// 动车组数据源的 serviceDay：按上海时间自 1970-01-01 起的天数
 /// （文档示例：2026-08-14 → 20679，已验证一致）
 DateTime _serviceDayToDate(int day) =>
     DateTime.fromMillisecondsSinceEpoch(day * 86400000, isUtc: true)
@@ -872,7 +872,7 @@ List<String> _emuNoVariants(String raw) {
   return out;
 }
 
-/// rail.re 的车组号是 CR400AF2031（无横杠），补成 CR400AF-2031
+/// 车组号交路源的车组号是 CR400AF2031（无横杠），补成 CR400AF-2031
 String _prettyEmuNo(String raw) {
   final s = raw.trim();
   if (s.isEmpty) return s;

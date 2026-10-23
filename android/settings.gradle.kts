@@ -17,6 +17,17 @@ pluginManagement {
     }
 }
 
+// ↓↓↓ 新增：这一段才是管项目依赖的
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        maven("https://storage.googleapis.com/download.flutter.io")
+        maven("https://maven.mozilla.org/maven2/")
+    }
+}
+
 plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "9.0.1" apply false

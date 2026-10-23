@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -6,13 +7,24 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:latlong2/latlong.dart';
-// Android 使用官方 webview_flutter，Windows 使用 webview_all
+// Android 使用 GeckoView (Firefox 引擎)，Windows 使用 webview_all
 import 'package:webview_flutter/webview_flutter.dart' as wv_flutter;
+import 'package:webview_flutter_geckoview/webview_flutter_geckoview.dart';
 import 'package:webview_all/webview_all.dart' as wv_all;
 
 import 'maplibre_map.dart';
+import '../config/app_endpoints.dart';
 
 State<MapLibreMapWidget> createMapLibreState() => _MapLibreMapMobileState();
+
+void _runWebViewJavaScript(_WebViewAdapter? controller, String code) {
+  if (controller == null) return;
+  unawaited(
+    controller.runJavaScript(code).catchError((Object error) {
+      debugPrint('[MapLibre] WebView JavaScript execution failed: $error');
+    }),
+  );
+}
 
 abstract class _WebViewAdapter {
   Future<void> setJavaScriptMode(bool unrestricted);
@@ -30,6 +42,17 @@ abstract class _WebViewAdapter {
 
 class _WebViewFlutterAdapter implements _WebViewAdapter {
   final wv_flutter.WebViewController controller;
+  HttpServer? _htmlServer;
+  final Map<String, void Function(String)> _channelCallbacks = {};
+  bool _urlBridgeInitialized = false;
+  void Function(dynamic)? _userConsoleCallback;
+  int _cmdSeq = 0;
+  Timer? _msgPollingTimer;
+  bool _msgPollingStarted = false;
+
+  // 命令队列：防止并发调用导致 cmdId 重复，以及 hash 变化太快导致事件丢失
+  final List<String> _cmdQueue = [];
+  bool _cmdQueueProcessing = false;
 
   _WebViewFlutterAdapter() : controller = wv_flutter.WebViewController();
 
@@ -42,30 +65,335 @@ class _WebViewFlutterAdapter implements _WebViewAdapter {
     );
   }
 
+  Future<void> _ensureUrlBridge() async {
+    if (_urlBridgeInitialized) return;
+    _urlBridgeInitialized = true;
+    final delegate = wv_flutter.NavigationDelegate(
+      onNavigationRequest: (request) async {
+        final uri = Uri.tryParse(request.url);
+        if (uri != null && uri.scheme == 'jsbridge') {
+          // 格式：jsbridge://channelName/message  (message 是 base64 编码)
+          final channel = uri.host;
+          final payloadBase64 = uri.path.replaceFirst('/', '');
+          try {
+            final payload = utf8.decode(base64Decode(payloadBase64));
+            final cb = _channelCallbacks[channel];
+            if (cb != null) {
+              cb(payload);
+            }
+          } catch (_) {}
+          return wv_flutter.NavigationDecision.prevent;
+        }
+        return wv_flutter.NavigationDecision.navigate;
+      },
+      onPageFinished: (url) {
+        // 页面加载完成后再启动轮询，避免干扰页面加载
+        debugPrint('[MapLibre-bridge] Page finished loading: $url');
+        _startMsgPolling();
+      },
+    );
+    await controller.setNavigationDelegate(delegate);
+  }
+
   @override
   Future<void> addJavaScriptChannel(
     String name, {
     required void Function(String) onMessageReceived,
   }) async {
-    await controller.addJavaScriptChannel(
-      name,
-      onMessageReceived: (msg) => onMessageReceived(msg.message),
-    );
+    _channelCallbacks[name] = onMessageReceived;
+    await _ensureUrlBridge();
+    // 注意：不调用 controller.addJavaScriptChannel()
+    // GeckoView 的 channel 在 content script 上下文，页面访问不到，
+    // 我们用自定义 URL scheme (jsbridge://) 做桥接
   }
 
   @override
   Future<void> setOnConsoleMessage(void Function(dynamic) callback) async {
-    await controller.setOnConsoleMessage((msg) => callback(msg));
+    try {
+      await controller.setOnConsoleMessage((msg) => callback(msg));
+    } on UnimplementedError {
+      // GeckoView 未实现 setOnConsoleMessage，忽略
+      _userConsoleCallback = callback;
+    }
   }
 
   @override
   Future<void> loadHtmlString(String html, {String? baseUrl}) async {
-    await controller.loadHtmlString(html, baseUrl: baseUrl);
+    // 在 </head> 前注入 jsbridge URL 桥接代码，确保页面 JS 一开始就能用
+    final bridgeScript = _buildBridgeScript();
+    final modifiedHtml = html.replaceFirst(
+      '</head>',
+      '$bridgeScript</head>',
+    );
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    _htmlServer = server;
+    server.listen((request) async {
+      request.response.headers.contentType = ContentType.html;
+      request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
+      request.response.write(modifiedHtml);
+      await request.response.close();
+    });
+    await controller.loadRequest(
+      Uri(scheme: 'http', host: '127.0.0.1', port: server.port, path: '/'),
+    );
+  }
+
+  String _buildBridgeScript() {
+    if (_channelCallbacks.isEmpty) return '';
+    final channelList = _channelCallbacks.keys.toList();
+    final channelsJs = jsonEncode(channelList);
+    return '''
+<script>
+(function() {
+  var channels = $channelsJs;
+  // === 页面 → Dart 消息队列 ===
+  window.__outgoingMsgQueue = [];
+  function enqueueMsg(chName, msg) {
+    window.__outgoingMsgQueue.push({ ch: chName, msg: String(msg) });
+    // 尝试用 iframe 方式（更快，如果 NavigationDelegate 支持的话）
+    try {
+      var encoded = btoa(unescape(encodeURIComponent(String(msg))));
+      var iframe = document.getElementById('__jsbridge_iframe__');
+      if (!iframe) {
+        iframe = document.createElement('iframe');
+        iframe.id = '__jsbridge_iframe__';
+        iframe.style.display = 'none';
+        document.documentElement.appendChild(iframe);
+      }
+      iframe.src = 'jsbridge://' + chName + '/' + encoded;
+    } catch(e) {}
+  }
+
+  channels.forEach(function(chName) {
+    // 如果原生 channel 已存在（标准 WebView），包装一下
+    if (window[chName] && typeof window[chName].postMessage === 'function') {
+      var origPost = window[chName].postMessage.bind(window[chName]);
+      window[chName].postMessage = function(msg) {
+        enqueueMsg(chName, msg);
+        try { origPost(msg); } catch(e) {}
+      };
+      return;
+    }
+    // 否则创建我们的 channel 对象
+    window[chName] = {
+      postMessage: function(msg) {
+        enqueueMsg(chName, msg);
+      }
+    };
+  });
+
+  // === Dart → 页面：监听 hash 变化执行命令 ===
+  var _lastProcessedCmdId = '';
+  
+  function decodeB64(str) {
+    try {
+      return decodeURIComponent(escape(atob(str)));
+    } catch(e) {
+      console.error('base64 decode failed:', e);
+      return '';
+    }
+  }
+
+  function checkHashCmd() {
+    var hash = window.location.hash;
+    var prefix = '#cmd:';
+    if (hash.indexOf(prefix) !== 0) return;
+    var payload = hash.substring(prefix.length);
+    // 格式: seq:base64code
+    var sepIdx = payload.indexOf(':');
+    if (sepIdx < 0) return;
+    var cmdId = payload.substring(0, sepIdx);
+    if (cmdId === _lastProcessedCmdId) return; // 避免重复执行
+    _lastProcessedCmdId = cmdId;
+    var b64 = payload.substring(sepIdx + 1);
+    var code = decodeB64(b64);
+    if (!code) return;
+    try {
+      // 在页面上下文中执行代码
+      var s = document.createElement('script');
+      s.textContent = code;
+      document.documentElement.appendChild(s);
+      s.remove();
+    } catch(e) {
+      console.error('hash cmd exec failed:', e);
+    }
+    // 执行完命令后，把待发送消息 flush 到 hash 中，供 Dart 端读取
+    setTimeout(flushMsgsToHash, 0);
+  }
+
+  // 把消息队列中的消息编码到 hash 中（用 replaceState，不触发 hashchange）
+  var __msgBatchId = 0;
+  function flushMsgsToHash() {
+    var q = window.__outgoingMsgQueue;
+    if (!q || q.length === 0) return;
+    try {
+      __msgBatchId++;
+      var jsonStr = JSON.stringify(q);
+      var encoded = btoa(unescape(encodeURIComponent(jsonStr)));
+      q.length = 0;
+      // 使用 replaceState 修改 hash，不触发 hashchange
+      // 格式: #msgs:batchId:base64json
+      var newHash = '#msgs:' + __msgBatchId + ':' + encoded;
+      history.replaceState(null, '', newHash);
+    } catch(e) {
+      console.error('flush msgs failed:', e);
+    }
+  }
+  window.__flushMsgsToHash = flushMsgsToHash;
+
+  window.addEventListener('hashchange', checkHashCmd);
+  // 页面加载后也检查一次
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', checkHashCmd);
+  } else {
+    checkHashCmd();
+  }
+})();
+</script>
+''';
   }
 
   @override
   Future<void> runJavaScript(String code) async {
-    await controller.runJavaScript(code);
+    // 加入命令队列，串行执行（避免并发导致 cmdId 重复和 hash 事件合并丢失）
+    _cmdQueue.add(code);
+    if (!_cmdQueueProcessing) {
+      _processCmdQueue();
+    }
+  }
+
+  Future<void> _processCmdQueue() async {
+    if (_cmdQueueProcessing) return;
+    _cmdQueueProcessing = true;
+    try {
+      while (_cmdQueue.isNotEmpty) {
+        // 取出队列中所有命令，合并成一个 batch 执行（减少 hash 变化次数）
+        final batch = _cmdQueue.toList();
+        _cmdQueue.clear();
+        final combinedCode = batch.join('\n');
+        debugPrint('[MapLibre-js-batch] ${batch.length} commands, first: ${combinedCode.substring(0, combinedCode.length > 120 ? 120 : combinedCode.length)}...');
+        await _executeJsViaHash(combinedCode);
+        // 执行完后留一点时间让页面处理和消息回传
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        await _drainMessagesFromHash();
+      }
+    } finally {
+      _cmdQueueProcessing = false;
+      // 处理过程中可能又有新命令入队，再检查一次
+      if (_cmdQueue.isNotEmpty) {
+        _processCmdQueue();
+      }
+    }
+  }
+
+  Future<void> _executeJsViaHash(String code) async {
+    // 同步递增序号（在任何 await 之前），确保每个命令有唯一 ID
+    _cmdSeq++;
+    final cmdId = _cmdSeq;
+    final codeBytes = utf8.encode(code);
+    final codeB64 = base64Encode(codeBytes);
+    try {
+      final currentUrl = await controller.currentUrl();
+      if (currentUrl != null && currentUrl.isNotEmpty) {
+        final uri = Uri.parse(currentUrl);
+        final newFragment = 'cmd:$cmdId:$codeB64';
+        final newUri = uri.replace(fragment: newFragment);
+        await controller.loadRequest(newUri);
+        debugPrint('[MapLibre-js-hash] cmd#$cmdId sent, b64len=${codeB64.length}');
+      }
+    } catch (e) {
+      debugPrint('[MapLibre-js-hash-error] $e');
+    }
+    
+    // 同时也用 script 注入方式尝试（双保险）
+    try {
+      final codeJson = jsonEncode(code);
+      final wrapped = '''
+(function() {
+  var s = document.createElement('script');
+  s.textContent = $codeJson;
+  (document.head || document.documentElement).appendChild(s);
+  s.remove();
+})();
+''';
+      await controller.runJavaScript(wrapped);
+    } catch (e) {
+      // script 注入可能在 GeckoView 中不工作，忽略
+    }
+  }
+
+  String _lastProcessedBatchId = '';
+
+  Future<void> _drainMessagesFromHash() async {
+    try {
+      final currentUrl = await controller.currentUrl();
+      if (currentUrl == null || currentUrl.isEmpty) return;
+      final uri = Uri.parse(currentUrl);
+      final fragment = uri.fragment;
+      const prefix = 'msgs:';
+      if (!fragment.startsWith(prefix)) return;
+      final payload = fragment.substring(prefix.length);
+      // 格式: batchId:base64json
+      final sepIdx = payload.indexOf(':');
+      if (sepIdx < 0) return;
+      final batchId = payload.substring(0, sepIdx);
+      if (batchId == _lastProcessedBatchId) return; // 已处理过
+      _lastProcessedBatchId = batchId;
+      
+      final msgB64 = payload.substring(sepIdx + 1);
+      final msgJson = utf8.decode(base64Decode(msgB64));
+      final List<dynamic> messages = jsonDecode(msgJson);
+      debugPrint('[MapLibre-hash-msg] batch=$batchId, count=${messages.length}');
+      for (final item in messages) {
+        if (item is! Map<String, dynamic>) continue;
+        final ch = item['ch'] as String?;
+        final msg = item['msg'] as String?;
+        if (ch == null || msg == null) continue;
+        final cb = _channelCallbacks[ch];
+        if (cb != null) cb(msg);
+      }
+    } catch (e) {
+      debugPrint('[MapLibre-hash-drain-error] $e');
+    }
+  }
+
+  void _startMsgPolling() {
+    if (_msgPollingStarted) return;
+    _msgPollingStarted = true;
+    debugPrint('[MapLibre-bridge] Starting hash-based message polling');
+    _msgPollingTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+      _pollMessages();
+    });
+  }
+
+  Future<void> _pollMessages() async {
+    // 发送 flush 命令，让页面把待发送消息写到 hash 中
+    try {
+      final currentUrl = await controller.currentUrl();
+      if (currentUrl == null || currentUrl.isEmpty) return;
+      final uri = Uri.parse(currentUrl);
+      // 如果命令队列正在处理中，跳过（避免冲突）
+      if (_cmdQueueProcessing) return;
+      // 如果队列中已经有命令在等待，也跳过（队列处理完会自动 drain）
+      if (_cmdQueue.isNotEmpty) return;
+      // 如果当前 hash 已经是 cmd: 开头，说明之前的命令还没处理
+      if (uri.fragment.startsWith('cmd:')) return;
+      
+      _cmdSeq++;
+      final cmdId = _cmdSeq;
+      const flushCode = 'window.__flushMsgsToHash && window.__flushMsgsToHash();';
+      final codeBytes = utf8.encode(flushCode);
+      final codeB64 = base64Encode(codeBytes);
+      final newFragment = 'cmd:$cmdId:$codeB64';
+      final newUri = uri.replace(fragment: newFragment);
+      await controller.loadRequest(newUri);
+      
+      // 等页面执行并修改 hash
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await _drainMessagesFromHash();
+    } catch (e) {
+      // 静默失败
+    }
   }
 
   @override
@@ -77,7 +405,13 @@ class _WebViewFlutterAdapter implements _WebViewAdapter {
   Widget buildWidget() => wv_flutter.WebViewWidget(controller: controller);
 
   @override
-  void dispose() {}
+  void dispose() {
+    _msgPollingTimer?.cancel();
+    _msgPollingTimer = null;
+    final server = _htmlServer;
+    _htmlServer = null;
+    if (server != null) unawaited(server.close(force: true));
+  }
 }
 
 class _WebViewAllAdapter implements _WebViewAdapter {
@@ -158,12 +492,18 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
   Future<void> _init() async {
     try {
-      final styleJson = await rootBundle.loadString(maplibreStyleAssetPath);
+      final styleJson = resolveMapStyle(
+        await rootBundle.loadString(maplibreStyleAssetPath),
+      );
       final maplibreJs = await rootBundle.loadString(maplibreJsAssetPath);
       final maplibreCss = await rootBundle.loadString(maplibreCssAssetPath);
       final viewId = 'maplibre-${identityHashCode(this)}';
 
-      // Android 用 webview_flutter，Windows 用 webview_all
+      // Android 端注册 GeckoView (Firefox 引擎)，替换系统 WebView
+      if (_isAndroid) {
+        GeckoWebViewPlatform.registerWith();
+      }
+      // Android 用 GeckoView，Windows 用 webview_all
       final controller = _isAndroid
           ? _WebViewFlutterAdapter()
           : _WebViewAllAdapter();
@@ -184,21 +524,25 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         await controller.clearCache();
       }
 
-      await controller.setOnConsoleMessage((msg) {
-        debugPrint('[MapLibre] ${msg.message}');
-      });
-
-      await controller.loadHtmlString(
-        _buildHtml(styleJson, maplibreJs, maplibreCss, viewId),
-        baseUrl: 'https://maplibre.local/',
-      );
+      try {
+        await controller.setOnConsoleMessage((msg) {
+          debugPrint('[MapLibre] ${msg.message}');
+        });
+      } on UnimplementedError {
+        debugPrint('[MapLibre] Console message listener is not supported by this WebView.');
+      }
 
       _webController = controller;
       _ctrlImpl._webView = controller;
+      if (mounted) setState(() {});
+
+      await controller.loadHtmlString(
+        _buildHtml(styleJson, maplibreJs, maplibreCss, viewId),
+        baseUrl: _isAndroid ? null : 'https://maplibre.local/',
+      );
+
       // Don't attach controller yet — wait for JS 'ready' event
       // so that move() calls work when the map is actually loaded.
-
-      if (mounted) setState(() {});
     } catch (e) {
       debugPrint('MapLibre init failed: $e');
       if (mounted) setState(() => _initError = e.toString());
@@ -212,6 +556,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     String viewId,
   ) {
     final styleLiteral = jsonEncode(styleJson);
+    final cdnListJson = jsonEncode(AppEndpoints.maplibreCdnJsdelivr);
     const useProxy = 'false';
     final isAndroid = _isAndroid ? 'true' : 'false';
     final centerLng = widget.initialCenter.longitude;
@@ -244,58 +589,6 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         '\n  colno=' + e.colno +
         '\n  stack=' + (err.stack || '(no stack)'));
     });
-
-    // === Android WebView getImageData 兼容补丁 ===
-    (function() {
-      console.log('[PATCH] Applying getImageData patch...');
-      var proto = CanvasRenderingContext2D.prototype;
-      var orig = proto.getImageData;
-      if (!orig) {
-        console.error('[PATCH] getImageData not found on prototype');
-        return;
-      }
-      console.log('[PATCH] Original getImageData: ' + typeof orig);
-
-      proto.getImageData = function(sx, sy, sw, sh) {
-        var fx = Math.floor(Number(sx) || 0);
-        var fy = Math.floor(Number(sy) || 0);
-        var fw = Math.floor(Math.max(1, Number(sw) || 1));
-        var fh = Math.floor(Math.max(1, Number(sh) || 1));
-        try {
-          return orig.call(this, fx, fy, fw, fh);
-        } catch(e1) {
-          // 如果整数参数也失败，尝试返回空 ImageData
-          console.warn('[PATCH] getImageData still failed: ' + e1.message +
-            ' args=(' + sx + ',' + sy + ',' + sw + ',' + sh + ')' +
-            ' floor=(' + fx + ',' + fy + ',' + fw + ',' + fh + ')');
-          try {
-            return this.createImageData(fw, fh);
-          } catch(e2) {
-            return orig.call(this, 0, 0, 1, 1);
-          }
-        }
-      };
-
-      // 同样修补 putImageData
-      var origPut = proto.putImageData;
-      if (origPut) {
-        proto.putImageData = function(imageData, dx, dy) {
-          return origPut.call(this, imageData, Math.floor(dx || 0), Math.floor(dy || 0));
-        };
-      }
-
-      // 测试补丁是否生效
-      try {
-        var testCanvas = document.createElement('canvas');
-        testCanvas.width = 10;
-        testCanvas.height = 10;
-        var testCtx = testCanvas.getContext('2d');
-        var imgData = testCtx.getImageData(0.5, 0.5, 2.7, 2.3);
-        console.log('[PATCH] Test getImageData(0.5,0.5,2.7,2.3) -> width=' + imgData.width + ' height=' + imgData.height + ' OK');
-      } catch(e) {
-        console.error('[PATCH] Test failed: ' + e.message);
-      }
-    })();
   </script>
   <script>
     $maplibreJs
@@ -315,81 +608,6 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
         var _isAndroid = $isAndroid;
         var style = JSON.parse($styleLiteral);
-        var railLabelMinZooms = {};
-        (style.layers || []).forEach(function(layer) {
-          if (layer.id && layer.id.indexOf('rw-label-') === 0) {
-            railLabelMinZooms[layer.id] = layer.minzoom || 0;
-          }
-        });
-
-        // === Android 二次补丁：确保 getImageData 参数整数化 ===
-        if (_isAndroid) {
-          (function() {
-            console.log('[PATCH-inside] Applying inside _initMap...');
-            var proto = CanvasRenderingContext2D.prototype;
-            var origGet = proto.getImageData;
-            if (origGet && !origGet.__patched) {
-              proto.getImageData = function(sx, sy, sw, sh) {
-                try {
-                  return origGet.call(
-                    this,
-                    parseInt(sx) || 0,
-                    parseInt(sy) || 0,
-                    Math.max(1, parseInt(sw) || 1),
-                    Math.max(1, parseInt(sh) || 1)
-                  );
-                } catch(e) {
-                  console.warn('[PATCH-inside] getImageData fallback: ' + e.message);
-                  try {
-                    return this.createImageData(Math.max(1, parseInt(sw) || 1), Math.max(1, parseInt(sh) || 1));
-                  } catch(e2) {
-                    return origGet.call(this, 0, 0, 1, 1);
-                  }
-                }
-              };
-              proto.getImageData.__patched = true;
-              console.log('[PATCH-inside] getImageData patched');
-            }
-            // 也拦截 getContext，确保新 canvas 也有补丁
-            var origGetContext = HTMLCanvasElement.prototype.getContext;
-            if (origGetContext && !origGetContext.__patched) {
-              HTMLCanvasElement.prototype.getContext = function(type, attrs) {
-                var ctx = origGetContext.call(this, type, attrs);
-                if (ctx && type === '2d' && ctx.getImageData && !ctx.getImageData.__patched) {
-                  var orig = ctx.getImageData.bind(ctx);
-                  ctx.getImageData = function(sx, sy, sw, sh) {
-                    try {
-                      return orig(
-                        parseInt(sx) || 0,
-                        parseInt(sy) || 0,
-                        Math.max(1, parseInt(sw) || 1),
-                        Math.max(1, parseInt(sh) || 1)
-                      );
-                    } catch(e) {
-                      try { return ctx.createImageData(Math.max(1, parseInt(sw) || 1), Math.max(1, parseInt(sh) || 1)); }
-                      catch(e2) { return orig(0, 0, 1, 1); }
-                    }
-                  };
-                  ctx.getImageData.__patched = true;
-                }
-                return ctx;
-              };
-              HTMLCanvasElement.prototype.getContext.__patched = true;
-              console.log('[PATCH-inside] getContext intercepted');
-            }
-          })();
-        }
-
-        if (_isAndroid && style.layers) {
-          // Android 兼容性处理：
-          // 1. 移除 glyphs（字形 PBF 在 Android WebView 上导致 mismatched image size 错误）
-          delete style.glyphs;
-          // 2. 移除所有 symbol 图层，避免触发字形渲染
-          style.layers = style.layers.filter(function(layer) {
-            return layer.type !== 'symbol';
-          });
-          console.log('Android: glyphs and symbol layers removed; railway sort keys preserved');
-        }
 
         // --- Android: replace railway tiles with tileproxy:// to bypass CORS ---
         if (_useProxy && style.sources && style.sources.railway) {
@@ -444,11 +662,6 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
         }
 
         var map = new maplibregl.Map(mapOpts);
-
-        // Android WebView 可能缺少远程 PBF 字形，用系统字体绘制线路名称。
-        if (_isAndroid) {
-          _setupAndroidRailLabels(map, railLabelMinZooms);
-        }
 
         map.on('load', function() {
           console.log('map loaded');
@@ -578,12 +791,8 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
       function pickLabel(properties, isStation) {
         var props = properties || {};
-        if (isStation) {
-          return toText(props.station_name) || toText(props['name:zh']) ||
-            toText(props.name_zh) || toText(props.name) || toText(props.station) || '';
-        }
-        return toText(props.name) || toText(props['name:zh']) ||
-          toText(props.name_zh) || toText(props.ref) || '';
+        return toText(props.station_name) || toText(props['name:zh']) ||
+          toText(props.name_zh) || toText(props.name) || toText(props.station) || '';
       }
 
       function midpointFromLine(geometry) {
@@ -639,33 +848,10 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
           ['station', 'stop_position', 'platform'].indexOf(publicTransport) !== -1 ||
           railway === 'platform' ||
           ['train_station', 'station'].indexOf(building) !== -1;
-        var isLine = geometry &&
-          (geometry.type === 'LineString' || geometry.type === 'MultiLineString') &&
-          railway && !isStation &&
-          ['service', 'spur', 'crossover'].indexOf(railway) === -1;
-
-        if (isLine) {
-          var lineMinZoom = isMetro ? minMetroLineZoom : minLineZoom;
-          if (zoom < lineMinZoom) return null;
-          var lineText = pickLabel(props, false);
-          var lineCoordinate = midpointFromLine(geometry);
-          if (!lineText || !lineCoordinate) return null;
-          return {
-            text: lineText,
-            coordinate: lineCoordinate,
-            priority: 0,
-            layer: Number(props.layer) || 0,
-            key: 'line:' + lineText + ':' +
-              (Number(props.layer) || 0) + ':' +
-              Math.round(lineCoordinate[0] * 30) + ':' +
-              Math.round(lineCoordinate[1] * 30)
-          };
-        }
-
         if (isStation) {
           var stationMinZoom = isMetro ? minMetroStationZoom : minStationZoom;
           if (zoom < stationMinZoom) return null;
-          var stationText = pickLabel(props, true);
+          var stationText = pickLabel(props);
           var coordinate = anchorFromGeometry(geometry);
           if (!stationText || !coordinate) return null;
           return {
@@ -869,10 +1055,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     }
 
     // --- The bundled MapLibre build is used first; CDN is only a fallback. ---
-    var _cdnList = [
-      'https://cdn.jsdelivr.net/npm/maplibre-gl@$maplibreVersion/dist/maplibre-gl.js',
-      'https://fastly.jsdelivr.net/npm/maplibre-gl@$maplibreVersion/dist/maplibre-gl.js'
-    ];
+    var _cdnList = $cdnListJson;
     var _cdnIdx = 0;
 
     function _loadMapLibre() {
@@ -911,6 +1094,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
   void _handleEvent(String jsonStr) {
     if (!mounted || jsonStr.trim().isEmpty) return;
+    debugPrint('[MapLibre-event] $jsonStr');
     try {
       final event = jsonDecode(jsonStr) as Map<String, dynamic>;
       final type = event['type'] as String;
@@ -1046,13 +1230,14 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
   }
 
   void _runJs(String code) {
-    _webController?.runJavaScript(code);
+    _runWebViewJavaScript(_webController, code);
   }
 
   void _updateAll() {
     _updateMarkers();
     _updatePolylines();
     _updateCircles();
+    _updateStationLabels();
   }
 
   void _updateMarkers() {
@@ -1076,6 +1261,15 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
     final json = jsonEncode(widget.circles.map((c) => c.toJson()).toList());
     _runJs(
       "window.__mapCtrl && window.__mapCtrl.setCircles(${jsonEncode(json)});",
+    );
+  }
+
+  void _updateStationLabels() {
+    if (!_mapReady) return;
+    final json =
+        jsonEncode(widget.stationLabels.map((s) => s.toJson()).toList());
+    _runJs(
+      "window.__mapCtrl && window.__mapCtrl.setStationLabels(${jsonEncode(json)});",
     );
   }
 
@@ -1118,7 +1312,7 @@ class _MapLibreMapMobileState extends State<MapLibreMapWidget> {
 
   @override
   void dispose() {
-    _runJs("window.__mapCtrl && window.__mapCtrl.destroy();");
+    _webController?.dispose();
     widget.controller?.detach();
     _tileRequests.clear();
     _tileClient?.close();
@@ -1142,7 +1336,8 @@ class _MobileControllerImpl {
   void move(double lat, double lng, double zoom) {
     _center = {'lat': lat, 'lng': lng};
     _zoom = zoom;
-    _webView?.runJavaScript(
+    _runWebViewJavaScript(
+      _webView,
       "window.__mapCtrl && window.__mapCtrl.moveTo($lat, $lng, $zoom);",
     );
   }

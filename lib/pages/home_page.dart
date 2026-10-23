@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:warningapplication_1/pages/train_search_page.dart';
+import 'package:train_fans_family/pages/train_search_page.dart';
 import '../models/function_item.dart';
 import '../services/app_settings_service.dart';
 import '../services/ble_warning_service.dart';

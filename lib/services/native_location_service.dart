@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:permission_handler/permission_handler.dart';
 
 class NativeLocation {
   final double latitude;
@@ -35,55 +34,50 @@ class NativeLocationService {
   static final NativeLocationService instance = NativeLocationService._();
 
   static const MethodChannel _channel = MethodChannel(
-    'com.example.warningapplication_1/overlay',
+    'com.example.train_fans_family/overlay',
   );
 
   static const EventChannel _locationStreamChannel = EventChannel(
-    'com.example.warningapplication_1/location_stream',
+    'com.example.train_fans_family/location_stream',
   );
 
   Future<NativeLocation?> getCurrentLocation() async {
-    if (defaultTargetPlatform == TargetPlatform.windows && !kIsWeb) {
-      try {
-        LocationPermission permission = await Geolocator.checkPermission();
-        if (permission == LocationPermission.denied ||
-            permission == LocationPermission.deniedForever) {
-          permission = await Geolocator.requestPermission();
-        }
-        if (permission == LocationPermission.denied ||
-            permission == LocationPermission.deniedForever ||
-            permission == LocationPermission.unableToDetermine) {
-          return null;
-        }
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) return null;
 
-        final position = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.low,
-            timeLimit: Duration(seconds: 15),
-          ),
-        );
-        return NativeLocation(
-          latitude: position.latitude,
-          longitude: position.longitude,
-        );
-      } catch (_) {
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever ||
+          permission == LocationPermission.unableToDetermine) {
         return null;
       }
-    }
 
-    final status = await Permission.locationWhenInUse.request();
-    if (!status.isGranted && !status.isLimited) return null;
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+        final update = await locationStream().first.timeout(
+          const Duration(seconds: 30),
+        );
+        return NativeLocation(
+          latitude: update.latitude,
+          longitude: update.longitude,
+        );
+      }
 
-    try {
-      final result = await _channel.invokeMapMethod<String, dynamic>(
-        'getCurrentLocation',
+      final locationSettings = LocationSettings(
+        accuracy: LocationAccuracy.high,
+        timeLimit: Duration(seconds: 30),
       );
-      if (result == null) return null;
-      final latitude = double.tryParse(result['latitude']?.toString() ?? '');
-      final longitude = double.tryParse(result['longitude']?.toString() ?? '');
-      if (latitude == null || longitude == null) return null;
-      return NativeLocation(latitude: latitude, longitude: longitude);
-    } on MissingPluginException {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: locationSettings,
+      );
+      return NativeLocation(
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+    } catch (error) {
+      debugPrint('Unable to get current location: $error');
       return null;
     }
   }

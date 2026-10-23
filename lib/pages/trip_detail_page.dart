@@ -3,7 +3,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:warningapplication_1/widgets/maplibre_map.dart';
+import 'package:train_fans_family/widgets/maplibre_map.dart';
 
 import '../models/trip_record.dart';
 import '../utils/map_config.dart';

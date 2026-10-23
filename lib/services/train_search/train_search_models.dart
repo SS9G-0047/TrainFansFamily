@@ -2,34 +2,34 @@
 part of '../../pages/train_search_page.dart';
 
 
-// ── 接口地址（如需自建反代，直接改这两个常量即可，路径保持一致）────────────
-const String _kKyfwBase = 'https://kyfw.12306.cn';
+// ── 接口地址（集中在 lib/config/app_endpoints.dart，git 已忽略）────────────
+const String _kKyfwBase = AppEndpoints.kyfwBase;
 
-const String _kSearchBase = 'https://search.12306.cn';
+const String _kSearchBase = AppEndpoints.searchBase;
 
 const String _kUserAgent =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 // ── 车组号数据源 ───────────────────────────────────────────────────────────
-// ① rail.re（Arnie97/moerail，静态站 + 公开 JSON，无鉴权）
+// ① 车组号交路源（静态站 + 公开 JSON，无鉴权，地址见 AppEndpoints.railReBase）
 //    GET /emu/{车组号}    → [{emu_no, train_no, date}, ...]
 //    GET /train/{车次}    → 同上（仅收录 G/D/C 动车）
-const String _kRailReBase = 'https://api.rail.re';
+const String _kRailReBase = AppEndpoints.railReBase;
 
-// ② OpenCRHTracker（lihugang/OpenCRHTracker，公开开发者 API，匿名可调用但有配额）
+// ② 动车组数据源（公开开发者 API，匿名可调用但有配额，地址见 AppEndpoints.crhBase）
 //    GET /api/v2/history/emu/{车组号}      → 该车组历史担当车次
 //    GET /api/v2/allocation/emu/{车组号}   → 配属/车型/路局/动车所
 //    GET /api/v2/timetable/station/{站名}  → 车站当日时刻表（大屏数据）
-const String _kCrhBase = 'https://crh.lihugang.top/api/v2';
+const String _kCrhBase = AppEndpoints.crhBase;
 
-// ③ 黄河铁路网（jprailfan.com，铁路工具箱）：里程数据。
+// ③ 铁路里程数据源（传统 PHP 站，地址见 AppEndpoints.huangheBase）。
 //    该站为传统 PHP 站，没有公开 JSON API；默认路径指向工具箱的里程查询页，
 //    {train} 会被替换成车次。若你的入口地址不同，只改这一个常量即可。
 //    返回 HTML 表格时用 _parseMileage 解析，返回 JSON 时走 JSON 分支。
-const String _kHuangheBase = 'https://www.jprailfan.com';
+const String _kHuangheBase = AppEndpoints.huangheBase;
 
-const String _kHuangheMileagePath = '/tools/mileage.php?train={train}';
+const String _kHuangheMileagePath = AppEndpoints.huangheMileagePath;
 
 const bool _kHuangheEnabled = true;
 
@@ -40,9 +40,9 @@ const bool _kCrhEnabled = true;
 // ── 正晚点数据源 ───────────────────────────────────────────────────────────
 // 12306 官方「正晚点查询」（zwdch）。接口未公开，路径与参数按抓包结果填写；
 // 只支持当天、且仅覆盖过去 1 小时 ~ 未来 3 小时的车次。
-const String _kLateBase = 'https://www.12306.cn/index/otn/zwdch';
+const String _kLateBase = AppEndpoints.lateBase;
 
-const String _kLatePath = '/query';
+const String _kLatePath = AppEndpoints.latePath;
 
 const bool _kLateEnabled = true;
 
@@ -88,17 +88,17 @@ const Duration _kTtlPas = Duration(minutes: 30); // 普速配属，一天才变�
 /// 车次详情页最多展示几组最近担当的动车组
 const int _kConsistMax = 10;
 
-/// 其中最多给几组补查车型（OpenCRHTracker 配额有限）
+/// 其中最多给几组补查车型（数据源配额有限）
 const int _kConsistProfileMax = 3;
 
-/// 车次查询时，最多给几个车组号补查 OpenCRHTracker 历史/配属
+/// 车次查询时，最多给几个车组号补查动车组数据源历史/配属
 const int _kEmuTrainExpandMax = 5;
 
 // ── 普速配属数据源（车厢 / 机车）───────────────────────────────────────────
-// ① 车厢（车辆）配属：https://cr400bf.passearch.info
+// ① 车厢（车辆）配属（地址见 AppEndpoints.pasCarBase）
 //      GET /index.php?keyword={kw}&type={type}&pagenum=N
 //      表头：型号 车号 现配属 定员 运用车次 制造厂 转向架
-// ② 机车配属：https://loco.passearch.info
+// ② 机车配属（地址见 AppEndpoints.pasLocoBase）
 //      GET /index.php?keyword={kw}&type={type}&pagenum=N
 //      表头：车号 配属 机务段 厂家 备注
 //
@@ -119,9 +119,9 @@ const int _kEmuTrainExpandMax = 5;
 //       输完整车号 HXD3D0001 会返回「0 条」——不是报错，是查不到。
 //    → 这是用户最容易踩的坑，界面上有提示。
 //    哪天站点补上了，往这两个 Map 里加一项即可（UI 会自动多出一个选项）。
-const String _kPasCarBase = 'https://cr400bf.passearch.info';
+const String _kPasCarBase = AppEndpoints.pasCarBase;
 
-const String _kPasLocoBase = 'https://loco.passearch.info';
+const String _kPasLocoBase = AppEndpoints.pasLocoBase;
 
 const bool _kPasCarEnabled = true;
 
@@ -478,15 +478,6 @@ class _StationTrain {
 /// 车组号来源
 enum _EmuSource { railRe, crhTracker }
 
-String _emuSourceLabel(_EmuSource s) {
-  switch (s) {
-    case _EmuSource.railRe:
-      return 'rail.re';
-    case _EmuSource.crhTracker:
-      return 'OpenCRHTracker';
-  }
-}
-
 /// 一条车组担当记录
 class _EmuRecord {
   final String emuNo; // CR400AF-2031
@@ -502,7 +493,7 @@ class _EmuRecord {
   });
 }
 
-/// 车组配属档案（OpenCRHTracker /allocation/emu 提供）
+/// 车组配属档案（动车组数据源 /allocation/emu 提供）
 class _EmuProfile {
   final String emuNo;
   final String model; // CR400AF-C

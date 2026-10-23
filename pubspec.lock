@@ -1250,6 +1250,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.14.1"
+  webview_flutter_geckoview:
+    dependency: "direct main"
+    description:
+      name: webview_flutter_geckoview
+      sha256: "84871ab653d228b0d8c70d2d82ba05c1460591b1a5b03c3fc68ee31dab13fc29"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.0.1+2"
   webview_flutter_platform_interface:
     dependency: transitive
     description:

@@ -27,7 +27,7 @@ class TtsService {
 
   static final TtsService instance = TtsService._();
   static const MethodChannel _channel = MethodChannel(
-    'com.example.warningapplication_1/tts',
+    'com.example.train_fans_family/tts',
   );
 
   /// 播放预警语音。

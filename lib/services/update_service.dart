@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../config/app_endpoints.dart';
+
 /// 更新信息模型
 class AppUpdateInfo {
   final String platform;
@@ -130,8 +132,8 @@ class UpdateService extends ChangeNotifier {
 
   static final UpdateService instance = UpdateService._();
 
-  /// 更新检测接口地址
-  static const String updateUrl = 'https://tff.xhcminecraft.top/update.json';
+  /// 更新检测接口地址（集中在 lib/config/app_endpoints.dart，git 已忽略）
+  static const String updateUrl = AppEndpoints.updateCheckUrl;
 
   /// 更新渠道：stable / beta
   static const String channel = 'stable';

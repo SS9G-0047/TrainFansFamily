@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 /// iOS 无对应实现，调用会直接忽略
 class LockScreenOverlay {
   static const MethodChannel _channel =
-      MethodChannel('com.example.warningapplication_1/overlay');
+      MethodChannel('com.example.train_fans_family/overlay');
 
   static bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;

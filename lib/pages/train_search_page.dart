@@ -24,17 +24,17 @@
 //                每行含：电报码 / 到发时刻 / 正晚点 / 里程 / 停靠时长
 //                顶部含：最近担当的动车组（动车，可有多组）或车型（普速）
 //   3. 车组号  : CR400AF-2031 / CRH2A-2001 / G83，交路 + 配属档案
-//                数据源：rail.re（api.rail.re）+ OpenCRHTracker（crh.lihugang.top）
-//                ⚠️ 车次与车组号在 rail.re 上是两个不同接口：
+//                数据源：车组号交路源 + 动车组数据源（地址见 AppEndpoints）
+//                ⚠️ 车次与车组号在车组号交路源上是两个不同接口：
 //                   GET /emu/{车组号}   → 该车组担当过哪些车次
 //                   GET /train/{车次}   → 该车次近期用过哪些车组
 //                本文件按关键词自动选路（_classifyEmuKeyword）：
 //                   G83 / 1461 这类 → 车次；CR/CRH 开头 → 车组号；
 //                   判不出来就两条都打。车次路线拿到车组号后，
-//                   再并发补 OpenCRHTracker 的历史与配属（最多 5 组）。
+//                   再并发补动车组数据源的历史与配属（最多 5 组）。
 //   4. 车站    : 某站当日大屏（站台 / 到发时刻 / 参考车型）
-//                数据源：OpenCRHTracker；点击车次直接进「车次」同款时刻表页
-//   5. 普速    : 车厢配属（cr400bf.passearch.info）/ 机车配属（loco.passearch.info）
+//                数据源：动车组数据源；点击车次直接进「车次」同款时刻表页
+//   5. 普速    : 车厢配属 / 机车配属（地址见 AppEndpoints）
 //                两个站都只有 HTML 表格、没有 JSON API，靠 _parseHtmlTable 硬解析
 //                （按表头文字定位列索引，不写死列序）。
 //                解析顺序：先按 <table> 把页面切成块，只认「含表头的那一块」，
@@ -61,7 +61,7 @@
 //                两个站每页固定 50 条，列表底部可「加载更多」。
 //
 // ── 里程数据源 ────────────────────────────────────────────────────────────
-//   黄河铁路网（jprailfan.com）：社区站，无公开 JSON API，返回的是传统 HTML
+//   铁路里程数据源：社区站，无公开 JSON API，返回的是传统 HTML
 //   页面。本文件用「先 JSON 后 HTML 表格」的双解析器抓取 站名→里程(km)，
 //   路径常量 _kHuangheMileagePath 需按该站工具箱实际 URL 调整（见下方注释）。
 //   抓不到时里程列显示「—」，不影响其余字段。
@@ -73,13 +73,13 @@
 //   结果进内存缓存 2 分钟；其余情况显示「—」。
 //
 // ⚠️ 关于直连 12306：
-//   12306 未对外开放公共 API，kyfw 域接口受瑞数动态防护 + 频控保护，
+//   12306 未对外开放公共 API，官方域接口受瑞数动态防护 + 频控保护，
 //   移动端/桌面端直连大概率返回 200 但 data 为空，或被要求滑块验证。
 //   生产环境建议自建反代（同路径转发），然后把下面两个 Base 常量换成你的域名。
 //
 // ⚠️ 关于第三方数据源：
-//   rail.re、OpenCRHTracker、黄河铁路网均为社区维护的公开接口/页面，
-//   无 SLA、无 CORS 承诺，OpenCRHTracker 有匿名配额
+//   各第三方数据源均为社区维护的公开接口/页面，
+//   无 SLA、无 CORS 承诺，动车组数据源有匿名配额
 //   （响应头 x-api-remain / x-api-cost / Retry-After），超限时返回 429。
 //   请低频使用，勿用于商业场景。
 // ============================================================================
@@ -90,6 +90,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
 import '../services/app_settings_service.dart';
+import '../config/app_endpoints.dart';
 
 part '../services/train_search/train_search_models.dart';
 part '../services/train_search/train_search_api.dart';
@@ -314,7 +315,7 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
           break;
 
         case _SearchMode.station:
-          // 车站大屏走 OpenCRHTracker，
+          // 车站大屏走动车组数据源，
           // 失败时回退 12306 原接口，保证功能不空。
           final kw = _fromCtrl.text.trim();
           if (kw.isEmpty) throw Exception('请输入车站名');
@@ -733,8 +734,8 @@ class _TrainSearchPageState extends State<TrainSearchPage> {
             padding: const EdgeInsets.fromLTRB(2, 6, 2, 0),
             child: Text(
               isCar
-                  ? '数据源 cr400bf.passearch.info　按「${_kPasCarTypes[_psCarType]}」查'
-                  : '数据源 loco.passearch.info　按「${_kPasLocoTypes[_psLocoType]}」查'
+                  ? '车厢配属数据　按「${_kPasCarTypes[_psCarType]}」查'
+                  : '机车配属数据　按「${_kPasLocoTypes[_psLocoType]}」查'
                       '${_psLocoTypeNote(_psLocoType)}',
               style: TextStyle(
                 fontSize: 11,
@@ -1934,7 +1935,7 @@ class _StationInputState extends State<_StationInput> {
 
 /// 车组号 / 车次担当查询页。
 ///
-/// 注意：这里**不按日期过滤**——车组担当来自 rail.re / OpenCRHTracker 的
+/// 注意：这里**不按日期过滤**——车组担当来自车组号交路源 / 动车组数据源的
 /// 历史记录，数据源本身也不接受日期参数，硬套日期只会让结果看起来是空的。
 class _EmuSearchPage extends StatefulWidget {
   /// 进入即查询的关键词（外部点车组号跳转时带上）
@@ -2155,23 +2156,12 @@ class _EmuSearchPageState extends State<_EmuSearchPage> {
             ),
           ),
         ],
-        const SizedBox(height: 8),
-        const Padding(
-          padding: EdgeInsets.all(8),
-          child: Text(
-            '数据来源 rail.re（Arnie97/moerail）与 '
-            'OpenCRHTracker（lihugang/OpenCRHTracker），'
-            '均为社区维护，仅供参考。',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 11, color: Colors.grey),
-          ),
-        ),
       ],
     );
   }
 }
 
-/// 普速配属查询页：车厢（cr400bf.passearch.info）+ 机车（loco.passearch.info）
+/// 普速配属查询页：车厢 + 机车（地址见 AppEndpoints）
 ///
 /// 两个站都只有 HTML 表格，靠硬解析取数；每页固定 50 条。
 /// 两栏各自独立：关键字、维度、结果、翻页都分开。
@@ -2411,8 +2401,8 @@ class _PsSearchPageState extends State<_PsSearchPage> {
             padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
             child: Text(
               isCar
-                  ? '数据源 cr400bf.passearch.info　按「${_kPasCarTypes[_carType]}」查'
-                  : '数据源 loco.passearch.info　按「${_kPasLocoTypes[_locoType]}」查'
+                  ? '车厢配属数据　按「${_kPasCarTypes[_carType]}」查'
+                  : '机车配属数据　按「${_kPasLocoTypes[_locoType]}」查'
                       '${_psLocoTypeNote(_locoType)}',
               style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
             ),

@@ -1,4 +1,4 @@
-package com.example.warningapplication_1.overlay
+package com.example.train_fans_family.overlay
 
 import android.app.Activity
 import android.content.BroadcastReceiver
@@ -13,7 +13,7 @@ import android.os.Looper
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
-import com.example.warningapplication_1.R
+import com.example.train_fans_family.R
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

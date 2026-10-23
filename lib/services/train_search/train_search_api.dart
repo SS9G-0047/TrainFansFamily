@@ -1,5 +1,5 @@
-// 网络层：全部数据源的请求封装（12306 / rail.re / OpenCRHTracker /
-//        黄河铁路网 / 普速配属两个 PHP 站）
+// 网络层：全部数据源的请求封装（官方 / 第三方数据源，
+//        铁路里程数据源 / 普速配属两个 PHP 站）
 part of '../../pages/train_search_page.dart';
 
 
@@ -562,7 +562,7 @@ class _RailwayApi {
     }
   }
 
-  /// 最近担当的动车组（动车走 rail.re /train/{车次}，返回近期全部车组），
+  /// 最近担当的动车组（动车走车组号交路源 /train/{车次}，返回近期全部车组），
   /// 普速只有车型时返回 12306 检索到的那一条；都没有则返回空列表。
   Future<List<_TrainConsist>> _consistsOf(_TrainDetail d) async {
     final key = 'consist|${d.trainCode.toUpperCase()}|${_fmtDash(d.date)}';
@@ -584,7 +584,7 @@ class _RailwayApi {
 
       final top = uniq.take(_kConsistMax).toList();
 
-      // 只给前几组补车型，避免把 OpenCRHTracker 配额打满
+      // 只给前几组补车型，避免把动车组数据源配额打满
       final models = <String, String>{};
       if (_kCrhEnabled) {
         final jobs = top
@@ -619,7 +619,7 @@ class _RailwayApi {
     return out;
   }
 
-  /// rail.re：GET /train/{车次} → 该车次近期担当车组（供车次详情页用）
+  /// 车组号交路源：GET /train/{车次} → 该车次近期担当车组（供车次详情页用）
   Future<List<_EmuRecord>> _railReByTrain(String trainCode) async {
     final part = await _railRePartByTrain(trainCode);
     return part.records
@@ -776,13 +776,13 @@ class _RailwayApi {
 
   /// 关键词既可以是车组号（CR400AF-2031 / CRH2A-2001），也可以是车次（G83）。
   ///
-  /// ⚠️ rail.re 两个方向的接口是不同的路径：
+  /// ⚠️ 车组号交路源两个方向的接口是不同的路径：
   ///   GET /emu/{车组号}  → 该车组近期担当的车次
   ///   GET /train/{车次}  → 该车次近期使用过的车组
   /// 之前只打 /emu/，所以输入车次必然「未收录」。这里先判定关键词类型，
   /// 再选对应路径；判不出来就两条都打。
   ///
-  /// 车次路线拿到车组号后，会再并发补 OpenCRHTracker 的历史与配属，
+  /// 车次路线拿到车组号后，会再并发补动车组数据源的历史与配属，
   /// 因此查一次 G83 能看到「近期用过的所有车组 + 各自的配属档案」。
   Future<_EmuResult> queryEmu(
     String keyword, {
@@ -801,7 +801,7 @@ class _RailwayApi {
 
     final kind = _classifyEmuKeyword(q);
 
-    // ① 先按类型打 rail.re
+    // ① 先按类型打车组号交路源
     final parts = <_EmuPart>[];
     final errors = <String>[];
 
@@ -818,12 +818,12 @@ class _RailwayApi {
 
     if (_kRailReEnabled) parts.add(await railReBy(kind));
 
-    // ② 车组号路线：直接打 OpenCRHTracker
+    // ② 车组号路线：直接打动车组数据源
     if (_kCrhEnabled && kind == _EmuQueryKind.emu) {
       parts.add(await _emuFromCrh(q));
     }
 
-    // ③ 车次路线：把 rail.re 给的车组号展开，补 OpenCRHTracker
+    // ③ 车次路线：把车组号交路源给的车组号展开，补动车组数据源
     if (_kCrhEnabled && kind == _EmuQueryKind.train) {
       final emuNos = <String>[];
       final seen = <String>{};
@@ -846,7 +846,7 @@ class _RailwayApi {
       parts.add(await _emuFromCrh(q));
     }
 
-    // ③-b 兜底：按车组号一路查下来 rail.re 一条都没有，
+    // ③-b 兜底：按车组号一路查下来车组号交路源一条都没有，
     // 再按车次路径试一次（仅此一次，常态不会多打请求）
     if (_kRailReEnabled &&
         kind == _EmuQueryKind.emu &&
@@ -939,7 +939,7 @@ class _RailwayApi {
     return trainPart.error == null ? trainPart : emuPart;
   }
 
-  /// ①-a rail.re：GET /emu/{车组号} → [ {emu_no, train_no, date}, ... ]
+  /// ①-a 车组号交路源：GET /emu/{车组号} → [ {emu_no, train_no, date}, ... ]
   ///     只接受车组号，传车次会「未收录」
   ///
   /// ⚠️ 车组号写法不统一：库里存的是 CR400BF5033（无横杠），
@@ -957,7 +957,7 @@ class _RailwayApi {
       try {
         final res = await _getPlain(
           Uri.parse('$_kRailReBase/emu/${Uri.encodeComponent(v)}'),
-          referer: 'https://rail.re/',
+          referer: AppEndpoints.railReReferer,
         ).timeout(const Duration(seconds: 15));
 
         if (res.statusCode == 404) {
@@ -983,7 +983,7 @@ class _RailwayApi {
     );
   }
 
-  /// ①-b rail.re：GET /train/{车次} → 该车次近期使用过的所有车组
+  /// ①-b 车组号交路源：GET /train/{车次} → 该车次近期使用过的所有车组
   ///     与 /emu/ 是两个不同的路径，查车次必须走这条
   Future<_EmuPart> _railRePartByTrain(String trainCode) async {
     const name = 'rail.re';
@@ -991,7 +991,7 @@ class _RailwayApi {
     try {
       final res = await _getPlain(
         Uri.parse('$_kRailReBase/train/${Uri.encodeComponent(code)}'),
-        referer: 'https://rail.re/',
+        referer: AppEndpoints.railReReferer,
       ).timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) {
         return _EmuPart.error(name, 'HTTP ${res.statusCode}');
@@ -1007,7 +1007,7 @@ class _RailwayApi {
     }
   }
 
-  /// rail.re 两种接口返回结构一致，共用解析：
+  /// 车组号交路源两种接口返回结构一致，共用解析：
   /// [ {emu_no, train_no, date}, ... ] → [_EmuRecord]
   ///
   /// 字段名做多候选：接口改版 / 不同分支的字段命名不一致时（emuNo / train /
@@ -1056,7 +1056,7 @@ class _RailwayApi {
     return out;
   }
 
-  /// ② OpenCRHTracker：历史担当 + 配属档案
+  /// ② 动车组数据源：历史担当 + 配属档案
   ///    车组号同样按 _emuNoVariants 逐个试，避免写法不一致导致空结果
   Future<_EmuPart> _emuFromCrh(String q) async {
     const name = 'OpenCRHTracker';
@@ -1068,8 +1068,8 @@ class _RailwayApi {
       for (final v in _emuNoVariants(q)) {
         final hist = await _getPlain(
           Uri.parse('$_kCrhBase/history/emu/${Uri.encodeComponent(v)}')
-              .replace(queryParameters: <String, String>{'limit': '60'}),
-          referer: 'https://crh.lihugang.top/',
+              .replace(queryParameters: <String, String>{'limit': '30'}),
+          referer: AppEndpoints.crhReferer,
         ).timeout(const Duration(seconds: 15));
 
         final parsed = <_EmuRecord>[];
@@ -1146,7 +1146,7 @@ class _RailwayApi {
     try {
       final res = await _getPlain(
         Uri.parse('$_kCrhBase/allocation/emu/${Uri.encodeComponent(q)}'),
-        referer: 'https://crh.lihugang.top/',
+        referer: AppEndpoints.crhReferer,
       ).timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) return null;
       final root = jsonDecode(res.body);
@@ -1191,7 +1191,7 @@ class _RailwayApi {
     _BoardPageStyle.timestamp,
   ];
 
-  /// 车站大屏：走 OpenCRHTracker 车站时刻表，失败则由上层回退 12306 原接口。
+  /// 车站大屏：走动车组数据源车站时刻表，失败则由上层回退 12306 原接口。
   ///
   /// 数据源单次上限 $_kBoardPageSize 条，大站必然截断，所以这里：
   ///   首屏自动翻满 _kBoardAutoPages 页，剩下的交给 loadMore 继续追加。
@@ -1356,7 +1356,7 @@ class _RailwayApi {
     return 0;
   }
 
-  /// OpenCRHTracker 车站时刻表：GET /api/v2/timetable/station/{站名}
+  /// 动车组数据源车站时刻表：GET /api/v2/timetable/station/{站名}
   /// [style] 为 none 时表示首页，不带任何翻页参数。
   Future<_BoardPage> _boardFetchPage(
     String station,
@@ -1385,7 +1385,7 @@ class _RailwayApi {
       Uri.parse(
         '$_kCrhBase/timetable/station/${Uri.encodeComponent(station)}',
       ).replace(queryParameters: qp),
-      referer: 'https://crh.lihugang.top/',
+      referer: AppEndpoints.crhReferer,
     ).timeout(const Duration(seconds: 15));
 
     if (res.statusCode == 404) throw Exception('未收录该站');
@@ -1486,7 +1486,7 @@ class _RailwayApi {
 
   // ══ 5. 普速配属查询（车厢 / 机车，两个完全独立的源）══════════════════════
 
-  /// 车厢配属查询（cr400bf.passearch.info）
+  /// 车厢配属查询（地址见 AppEndpoints.pasCarBase）
   ///
   /// 两个站都只有 HTML 表格，靠 _parseHtmlTable 硬解析。
   /// 按哪个维度（type）、查什么关键词，全部由用户在界面上选，代码不做猜测与回退。
@@ -1527,7 +1527,7 @@ class _RailwayApi {
     return part;
   }
 
-  /// 机车配属查询（loco.passearch.info）
+  /// 机车配属查询（地址见 AppEndpoints.pasLocoBase）
   Future<_LocoPart> queryLocoStock(
     String keyword,
     String type, {

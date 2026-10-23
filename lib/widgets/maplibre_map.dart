@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../config/app_endpoints.dart';
+
 import 'maplibre_map_mobile.dart'
     if (dart.library.html) 'maplibre_map_web.dart'
     as platform;
@@ -8,11 +10,22 @@ import 'maplibre_map_mobile.dart'
 const String maplibreStyleAssetPath = 'lib/assets/maplibre/map_style.json';
 const String maplibreJsAssetPath = 'lib/assets/maplibre/maplibre-gl.js';
 const String maplibreCssAssetPath = 'lib/assets/maplibre/maplibre-gl.css';
-const String maplibreVersion = '4.7.1';
-const String maplibreCdnBase =
-    'https://unpkg.com/maplibre-gl@$maplibreVersion/dist';
+const String maplibreVersion = AppEndpoints.maplibreVersion;
+const String maplibreCdnBase = AppEndpoints.maplibreCdnUnpkg;
 const double maplibreMinZoom = 4;
-const double maplibreMaxZoom = 19;
+const double maplibreMaxZoom = 18;
+
+/// 把 map_style.json 中的占位符替换为 AppEndpoints 里的真实地址。
+/// 瓦片 / 矢量切片 URL 集中在 git 忽略的 app_endpoints.dart 中。
+String resolveMapStyle(String rawStyleJson) {
+  var out = rawStyleJson;
+  final amapTiles = AppEndpoints.amapRasterTiles;
+  for (var i = 0; i < amapTiles.length && i < 4; i++) {
+    out = out.replaceAll('__AMAP_TILE_${i}__', amapTiles[i]);
+  }
+  out = out.replaceAll('__RAILWAY_VECTOR_TILE__', AppEndpoints.railwayVectorTile);
+  return out;
+}
 
 const String kMapControllerJs = r'''
 window.createMapController = function(map, viewType) {
@@ -56,9 +69,72 @@ window.createMapController = function(map, viewType) {
   map.on('zoomstart', function() { hasGesture = true; });
   map.on('pitchstart', function() { hasGesture = true; });
 
+  var clickSerial = 0;
+  var touchGesture = null;
+  var touchTapTimer = null;
   map.on('click', function(e) {
+    clickSerial++;
+    if (touchTapTimer) {
+      clearTimeout(touchTapTimer);
+      touchTapTimer = null;
+    }
     sendEvent('tap', { lat: e.lngLat.lat, lng: e.lngLat.lng });
   });
+
+  var canvas = map.getCanvas();
+  canvas.addEventListener('touchstart', function(e) {
+    if (e.touches.length !== 1) {
+      touchGesture = null;
+      return;
+    }
+    var touch = e.touches[0];
+    var rect = canvas.getBoundingClientRect();
+    touchGesture = {
+      x: touch.clientX - rect.left,
+      y: touch.clientY - rect.top,
+      startedAt: Date.now(),
+      clickSerial: clickSerial,
+      moved: false,
+      multiTouch: false
+    };
+  }, { passive: true });
+  canvas.addEventListener('touchmove', function(e) {
+    if (!touchGesture) return;
+    if (e.touches.length > 1) {
+      touchGesture.multiTouch = true;
+      return;
+    }
+    var touch = e.touches[0];
+    var rect = canvas.getBoundingClientRect();
+    var dx = touch.clientX - rect.left - touchGesture.x;
+    var dy = touch.clientY - rect.top - touchGesture.y;
+    if (dx * dx + dy * dy > 144) touchGesture.moved = true;
+  }, { passive: true });
+  canvas.addEventListener('touchend', function(e) {
+    if (!touchGesture) return;
+    if (e.touches.length > 0 || e.changedTouches.length !== 1) {
+      touchGesture.multiTouch = true;
+      return;
+    }
+    var gesture = touchGesture;
+    touchGesture = null;
+    if (gesture.moved || gesture.multiTouch || Date.now() - gesture.startedAt > 600) return;
+
+    if (touchTapTimer) clearTimeout(touchTapTimer);
+    touchTapTimer = setTimeout(function() {
+      touchTapTimer = null;
+      if (clickSerial !== gesture.clickSerial) return;
+      var lngLat = map.unproject([gesture.x, gesture.y]);
+      sendEvent('tap', { lat: lngLat.lat, lng: lngLat.lng });
+    }, 200);
+  }, { passive: true });
+  canvas.addEventListener('touchcancel', function() {
+    touchGesture = null;
+    if (touchTapTimer) {
+      clearTimeout(touchTapTimer);
+      touchTapTimer = null;
+    }
+  }, { passive: true });
 
   map.on('moveend', function() {
     var c = map.getCenter();
@@ -69,6 +145,10 @@ window.createMapController = function(map, viewType) {
   function clearMarkers() {
     markers.forEach(function(m) { m.remove(); });
     markers = [];
+    var layerId = 'markers-circle-' + viewType;
+    var srcId = 'markers-src-' + viewType;
+    if (map.getLayer(layerId)) map.removeLayer(layerId);
+    if (map.getSource(srcId)) map.removeSource(srcId);
   }
 
   function clearPolylines() {
@@ -87,6 +167,15 @@ window.createMapController = function(map, viewType) {
     var srcId = 'circles-src-' + viewType;
     if (map.getLayer(fillId)) map.removeLayer(fillId);
     if (map.getLayer(strokeId)) map.removeLayer(strokeId);
+    if (map.getSource(srcId)) map.removeSource(srcId);
+  }
+
+  function clearStationLabels() {
+    var dotId = 'station-dot-' + viewType;
+    var labelId = 'station-label-' + viewType;
+    var srcId = 'station-src-' + viewType;
+    if (map.getLayer(labelId)) map.removeLayer(labelId);
+    if (map.getLayer(dotId)) map.removeLayer(dotId);
     if (map.getSource(srcId)) map.removeSource(srcId);
   }
 
@@ -118,38 +207,73 @@ window.createMapController = function(map, viewType) {
       onReady(function() {
         clearMarkers();
         var list = JSON.parse(json);
+        // 分离普通 marker（用 circle 层）和"我的位置" marker（用 DOM marker）
+        var dotMarkers = [];
         list.forEach(function(m, i) {
-          var el = document.createElement('div');
           if (m.isMyLocation) {
-            // My location marker: green target-style concentric circles
-            // Outer ring
+            // 我的位置 marker: DOM 方式，同心圆样式
+            var el = document.createElement('div');
             el.style.cssText = 'width:' + m.size + 'px;height:' + m.size + 'px;position:relative;';
             var ring1 = document.createElement('div');
             ring1.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;border-radius:50%;border:3px solid ' + m.color + ';background:transparent;box-sizing:border-box;';
             el.appendChild(ring1);
-            // Middle ring
             var ring2 = document.createElement('div');
             ring2.style.cssText = 'position:absolute;top:25%;left:25%;width:50%;height:50%;border-radius:50%;border:2px solid ' + m.color + ';background:transparent;box-sizing:border-box;opacity:0.8;';
             el.appendChild(ring2);
-            // Center dot
             var dot = document.createElement('div');
             dot.style.cssText = 'position:absolute;top:50%;left:50%;width:28%;height:28%;border-radius:50%;background:' + m.color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);transform:translate(-50%,-50%);';
             el.appendChild(dot);
+            var marker = new maplibregl.Marker(el).setLngLat([m.lng, m.lat]).addTo(map);
+            markers.push(marker);
           } else {
-            el.style.cssText = 'width:' + m.size + 'px;height:' + m.size + 'px;border-radius:50%;background:' + m.color + ';border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4);cursor:pointer;flex-shrink:0;';
-            if (m.icon) {
-              el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#fff;font-size:' + Math.floor(m.size * 0.55) + 'px;">' + m.icon + '</div>';
-            }
+            dotMarkers.push(m);
           }
-          var marker = new maplibregl.Marker(el).setLngLat([m.lng, m.lat]).addTo(map);
-          if (m.hasClick) {
-            el.addEventListener('click', function(e) {
-              e.stopPropagation();
-              sendEvent('markerClick', { id: m.id });
-            });
-          }
-          markers.push(marker);
         });
+        // 普通 marker: GeoJSON circle 层（更可靠）
+        if (dotMarkers.length > 0) {
+          var features = dotMarkers.map(function(m, i) {
+            return {
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: [m.lng, m.lat] },
+              properties: { color: m.color, size: m.size, index: i, hasClick: m.hasClick ? 1 : 0, id: m.id || '' }
+            };
+          });
+          var srcId = 'markers-src-' + viewType;
+          var layerId = 'markers-circle-' + viewType;
+          map.addSource(srcId, {
+            type: 'geojson',
+            data: { type: 'FeatureCollection', features: features }
+          });
+          map.addLayer({
+            id: layerId,
+            type: 'circle',
+            source: srcId,
+            paint: {
+              'circle-radius': ['interpolate', ['linear'], ['zoom'],
+                8, ['/', ['get', 'size'], 4],
+                15, ['/', ['get', 'size'], 2]
+              ],
+              'circle-color': ['get', 'color'],
+              'circle-stroke-color': '#ffffff',
+              'circle-stroke-width': 2
+            }
+          });
+          // marker 点击事件
+          map.on('click', layerId, function(e) {
+            if (e.features && e.features.length > 0) {
+              var props = e.features[0].properties;
+              if (props.hasClick === 1) {
+                sendEvent('markerClick', { id: props.id });
+              }
+            }
+          });
+          map.on('mouseenter', layerId, function() {
+            map.getCanvas().style.cursor = 'pointer';
+          });
+          map.on('mouseleave', layerId, function() {
+            map.getCanvas().style.cursor = '';
+          });
+        }
       });
     },
     setPolylines: function(json) {
@@ -215,10 +339,64 @@ window.createMapController = function(map, viewType) {
         });
       });
     },
+    setStationLabels: function(json) {
+      onReady(function() {
+        clearStationLabels();
+        var list = JSON.parse(json);
+        if (list.length === 0) return;
+        var features = list.map(function(s, i) {
+          return {
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
+            properties: { name: s.name, index: i }
+          };
+        });
+        var srcId = 'station-src-' + viewType;
+        var dotId = 'station-dot-' + viewType;
+        var labelId = 'station-label-' + viewType;
+        map.addSource(srcId, {
+          type: 'geojson',
+          data: { type: 'FeatureCollection', features: features }
+        });
+        map.addLayer({
+          id: dotId,
+          type: 'circle',
+          source: srcId,
+          paint: {
+            'circle-radius': 5,
+            'circle-color': '#C62828',
+            'circle-stroke-color': '#ffffff',
+            'circle-stroke-width': 2
+          }
+        });
+        map.addLayer({
+          id: labelId,
+          type: 'symbol',
+          source: srcId,
+          layout: {
+            'text-field': ['get', 'name'],
+            'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+            'text-size': 14,
+            'text-offset': [0, -1.2],
+            'text-anchor': 'bottom',
+            'text-allow-overlap': true,
+            'text-ignore-placement': true,
+            'text-keep-upright': true
+          },
+          paint: {
+            'text-color': '#C62828',
+            'text-halo-color': 'rgba(255,255,255,0.95)',
+            'text-halo-width': 2.5
+          }
+        });
+      });
+    },
     destroy: function() {
+      if (touchTapTimer) clearTimeout(touchTapTimer);
       clearMarkers();
       clearPolylines();
       clearCircles();
+      clearStationLabels();
       map.remove();
     }
   };
@@ -293,6 +471,19 @@ class MapCircle {
     'radius': radius,
     'color': _colorToHex(color),
     'fillColor': _colorToHex(fillColor),
+  };
+}
+
+class MapStationLabel {
+  final String name;
+  final LatLng point;
+
+  MapStationLabel({required this.name, required this.point});
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'lat': point.latitude,
+    'lng': point.longitude,
   };
 }
 
@@ -379,6 +570,7 @@ class MapLibreMapWidget extends StatefulWidget {
   final List<MapMarker> markers;
   final List<MapPolyline> polylines;
   final List<MapCircle> circles;
+  final List<MapStationLabel> stationLabels;
   final MapTapCallback? onMapTap;
   final MapMoveCallback? onPositionChanged;
   final MapLibreController? controller;
@@ -390,6 +582,7 @@ class MapLibreMapWidget extends StatefulWidget {
     this.markers = const [],
     this.polylines = const [],
     this.circles = const [],
+    this.stationLabels = const [],
     this.onMapTap,
     this.onPositionChanged,
     this.controller,

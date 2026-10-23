@@ -1,4 +1,4 @@
-package com.example.warningapplication_1.overlay
+package com.example.train_fans_family.overlay
 
 import android.app.NotificationChannel
 import android.app.KeyguardManager
@@ -21,8 +21,8 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
-import com.example.warningapplication_1.MainActivity
-import com.example.warningapplication_1.R
+import com.example.train_fans_family.MainActivity
+import com.example.train_fans_family.R
 
 class OverlayService : Service() {
     private var windowManager: WindowManager? = null

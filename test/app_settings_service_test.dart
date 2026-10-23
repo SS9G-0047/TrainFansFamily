@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:warningapplication_1/services/app_settings_service.dart';
+import 'package:train_fans_family/services/app_settings_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

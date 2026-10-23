@@ -34,6 +34,6 @@
 
 ## About other languages / 关于其它语言支持
 
-We'll finish supporting English at around Jan 2027. This APP don't support any language except Chinese right now. So the Readme won't have English version till Jan 2026. Any issue about supporting English or other languages will be seen as damage activity.
+We will support Zh-Hant but other languages including English is not scheduled. Apologize for the inconvenience we have caused.
 
-我们将在2027年1月左右完成对英语的支持。这个移动应用目前不会适配除中文外任何其它语言。Readme亦不会再2026年1月前完成英文翻译。任何关于适配其它语种的issue会被认定为破坏行为。
+我们会适配繁体中文，但是英语在内的其它语言不在计划之内。由此带来的不便，敬请谅解！

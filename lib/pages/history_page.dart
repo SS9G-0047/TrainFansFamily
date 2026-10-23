@@ -3,8 +3,8 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:warningapplication_1/models/camera_position.dart' as cam_model;
-import 'package:warningapplication_1/widgets/maplibre_map.dart';
+import 'package:train_fans_family/models/camera_position.dart' as cam_model;
+import 'package:train_fans_family/widgets/maplibre_map.dart';
 import '../models/warning_history_record.dart';
 import '../services/camera_position_service.dart';
 import '../services/warning_history_service.dart';

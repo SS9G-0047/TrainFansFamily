@@ -321,7 +321,6 @@ Widget _buildEmuRecordCard(
   void Function(String emuNo)? onPickEmu,
 }) {
   final cs = Theme.of(context).colorScheme;
-  final isCrh = r.source == _EmuSource.crhTracker;
   final canPickEmu = onPickEmu != null && r.emuNo.isNotEmpty;
   return Card(
       child: ListTile(
@@ -363,20 +362,6 @@ Widget _buildEmuRecordCard(
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: isCrh ? cs.tertiaryContainer : cs.secondaryContainer,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                _emuSourceLabel(r.source),
-                style: TextStyle(
-                  fontSize: 10,
-                  color: isCrh ? cs.onTertiaryContainer : cs.onSecondaryContainer,
-                ),
-              ),
-            ),
             if (r.trainCode.isNotEmpty && onPickTrain != null) ...<Widget>[
               const SizedBox(width: 4),
               IconButton(

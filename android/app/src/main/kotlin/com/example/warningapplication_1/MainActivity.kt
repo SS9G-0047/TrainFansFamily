@@ -1,4 +1,4 @@
-package com.example.warningapplication_1
+package com.example.train_fans_family
 
 import android.Manifest
 import android.content.ContentUris
@@ -32,13 +32,13 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
-import com.example.warningapplication_1.overlay.OverlayService
+import com.example.train_fans_family.overlay.OverlayService
 
 class MainActivity : FlutterActivity() {
-    private val overlayChannel = "com.example.warningapplication_1/overlay"
-    private val ttsChannel = "com.example.warningapplication_1/tts"
-    private val imageChannel = "com.example.warningapplication_1/native_images"
-    private val locationStreamChannel = "com.example.warningapplication_1/location_stream"
+    private val overlayChannel = "com.example.train_fans_family/overlay"
+    private val ttsChannel = "com.example.train_fans_family/tts"
+    private val imageChannel = "com.example.train_fans_family/native_images"
+    private val locationStreamChannel = "com.example.train_fans_family/location_stream"
     private val takePhotoRequestCode = 8102
     private val imagePermissionRequestCode = 8103
     private val cameraPermissionRequestCode = 8104
@@ -633,23 +633,33 @@ class MainActivity : FlutterActivity() {
             // NETWORK 通过基站/WiFi 快速定位（1-3 秒），
             // GPS 提供精确位置但冷启动慢（30 秒+）。
             var anyProviderStarted = false
-            if (streamLocationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true) {
-                streamLocationManager?.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    1000L,
-                    0f,
-                    streamLocationListener!!
-                )
-                anyProviderStarted = true
+            if (fineGranted &&
+                streamLocationManager?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true
+            ) {
+                try {
+                    streamLocationManager?.requestLocationUpdates(
+                        LocationManager.GPS_PROVIDER,
+                        1000L,
+                        0f,
+                        streamLocationListener!!
+                    )
+                    anyProviderStarted = true
+                } catch (e: SecurityException) {
+                    android.util.Log.w("MainActivity", "GPS location permission unavailable", e)
+                }
             }
             if (streamLocationManager?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true) {
-                streamLocationManager?.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    1000L,
-                    0f,
-                    streamLocationListener!!
-                )
-                anyProviderStarted = true
+                try {
+                    streamLocationManager?.requestLocationUpdates(
+                        LocationManager.NETWORK_PROVIDER,
+                        1000L,
+                        0f,
+                        streamLocationListener!!
+                    )
+                    anyProviderStarted = true
+                } catch (e: SecurityException) {
+                    android.util.Log.w("MainActivity", "Network location permission unavailable", e)
+                }
             }
             if (!anyProviderStarted) {
                 mainHandler.post {

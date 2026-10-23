@@ -49,3 +49,8 @@ app.*.map.json
 
 #TRAE
 .trae-html-share-packages/
+
+# 敏感配置：外部接口地址 / 瓦片服务地址集中定义文件
+# 新克隆仓库后，请复制 lib/config/app_endpoints.example.dart 为
+# lib/config/app_endpoints.dart 并填入真实地址
+lib/config/app_endpoints.dart

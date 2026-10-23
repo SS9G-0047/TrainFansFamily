@@ -1,4 +1,4 @@
-package com.example.warningapplication_1
+package com.example.train_fans_family
 
 import android.app.Notification
 import android.app.NotificationChannel
